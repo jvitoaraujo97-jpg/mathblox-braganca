@@ -1,6 +1,8 @@
 import { MathQuestion } from '../types/game';
+import { EARLY_GRADE_QUESTIONS } from './questionsEarlyGrades';
+import { UPPER_GRADE_EXTRA_QUESTIONS } from './questionsUpperExtra';
 
-export const MATH_QUESTIONS: MathQuestion[] = [
+const CORE_QUESTIONS: MathQuestion[] = [
   // =========================================================================
   // MUNDO 1: 5º ANO (Rafaela) — BNCC EF05MA01 a EF05MA21
   // Permitido: Sistema decimal até centena de milhar, +, -, ×, ÷ com naturais,
@@ -573,6 +575,12 @@ export const MATH_QUESTIONS: MathQuestion[] = [
     correctIndex: 1,
     explanation: 'Na tabuada do 9: 9 × 6 = 54 bolas! Excelente domínio da base!',
   },
+];
+
+export const MATH_QUESTIONS: MathQuestion[] = [
+  ...EARLY_GRADE_QUESTIONS,
+  ...CORE_QUESTIONS,
+  ...UPPER_GRADE_EXTRA_QUESTIONS,
 ];
 
 export function getQuestionsForWorld(worldId: number): MathQuestion[] {

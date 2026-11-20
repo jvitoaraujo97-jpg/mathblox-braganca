@@ -1,24 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   AlertTriangle,
   ArrowLeft,
   Coins,
   Flame,
+  Menu,
   RotateCcw,
   ShieldCheck,
+  Sliders,
   Timer,
   Trophy,
+  X,
 } from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
-import { AudioSettingsButton } from '../components/AudioSettingsModal';
+import { AudioSettingsModal } from '../components/AudioSettingsModal';
 import { MobileControls, MobileInputState } from '../components/MobileControls';
-import { getQuestionsForMode } from '../data/questionEngine';
+import { getQuestionsForMode, recordAnsweredQuestion } from '../data/questionEngine';
 import { getDifficultyConfig, getWorldById } from '../data/worlds';
 import { animateAvatarRig, AvatarRig, createAvatarRig } from '../game/avatarBuilder';
 import { createAnswerPadTexture, createLavaTexture, createStudTexture } from '../game/textures';
+import { logQuestionAttempt } from '../services/researchTelemetry';
 import { MathQuestion, StudentProfile, TowerDifficulty } from '../types/game';
+import {
+  createPbrRenderer,
+  disposeSceneResources,
+  getGraphicsQuality,
+  GraphicsQuality,
+  isSoftwareGl,
+  setupTropicalEnvironment,
+  subscribeGraphicsQuality,
+} from './graphicsEngine';
+import { createTiledPbrTextures } from './textureFactory';
 
 interface SurvivalArenaGameProps {
   student: StudentProfile;
@@ -35,17 +48,6 @@ interface SurvivalArenaGameProps {
   }) => void;
   onExit: () => void;
 }
-
-const isSoftwareGl = (() => {
-  if (typeof document === 'undefined') return false;
-  const gl = document.createElement('canvas').getContext('webgl2');
-  if (!gl) return true;
-  const ext = gl.getExtension('WEBGL_debug_renderer_info');
-  const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
-  const gpu = String(gl.getParameter(param));
-  gl.getExtension('WEBGL_lose_context')?.loseContext();
-  return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
-})();
 
 const TOTAL_WAVES = 8;
 const WAVE_COUNTDOWN_SECONDS = 12;
@@ -95,12 +97,19 @@ export function SurvivalArenaGame({
   const mountRef = useRef<HTMLDivElement>(null);
   const [runKey, setRunKey] = useState(1);
   const [rotateCameraSignal, setRotateCameraSignal] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [audioOpen, setAudioOpen] = useState(false);
+  const [graphicsQuality, setGraphicsQualityState] = useState<GraphicsQuality>(() =>
+    getGraphicsQuality()
+  );
+
+  useEffect(() => subscribeGraphicsQuality(setGraphicsQualityState), []);
 
   const world = useMemo(() => getWorldById(worldId), [worldId]);
   const diffConfig = useMemo(() => getDifficultyConfig(difficulty), [difficulty]);
   const questions = useMemo(
-    () => getQuestionsForMode(worldId, 'survival', TOTAL_WAVES),
-    [worldId, runKey]
+    () => getQuestionsForMode(worldId, 'survival', TOTAL_WAVES, student.id),
+    [worldId, runKey, student.id]
   );
 
   const [hudState, setHudState] = useState<{
@@ -151,35 +160,19 @@ export function SurvivalArenaGame({
     const height = container.clientHeight || window.innerHeight;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x38bdf8);
-    scene.fog = new THREE.Fog(0xbae6fd, 58, 210);
 
-    const camera = new THREE.PerspectiveCamera(60, width / height, 0.2, 230);
-    const renderer = new THREE.WebGLRenderer({
-      antialias: !isSoftwareGl,
-      powerPreference: 'high-performance',
+    const camera = new THREE.PerspectiveCamera(60, width / height, 0.2, 260);
+    const { renderer, maxAnisotropy: maxAniso } = createPbrRenderer(container, graphicsQuality);
+    const envRig = setupTropicalEnvironment(scene, renderer, {
+      fogColor: 0xd8f1fe,
+      fogDensity: 0.0042,
+      skyRadius: 230,
+      shadowFrustum: 28,
+      sunOffset: [16, 32, 18],
+      hemiIntensity: 0.9,
+      sunIntensity: 1.5,
+      quality: graphicsQuality,
     });
-    renderer.setSize(width, height);
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.1;
-    renderer.shadowMap.enabled = !isSoftwareGl;
-    container.appendChild(renderer.domElement);
-
-    const maxAniso = renderer.capabilities.getMaxAnisotropy();
-
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    pmrem.dispose();
-
-    const hemiLight = new THREE.HemisphereLight(0xfef3c7, 0x0284c7, 0.95);
-    scene.add(hemiLight);
-
-    const keyLight = new THREE.DirectionalLight(0xfff7ed, 1.6);
-    keyLight.position.set(16, 32, 18);
-    keyLight.castShadow = !isSoftwareGl;
-    scene.add(keyLight);
 
     // Central Lava Pool Below 3x3 Board
     const lavaTex = createLavaTexture(maxAniso);
@@ -195,11 +188,14 @@ export function SurvivalArenaGame({
     lavaMesh.position.set(0, -6.4, 0);
     scene.add(lavaMesh);
 
-    // Mirante do Caeté e Ilhas Costeiras de Bragança around the Arena
+    // Mirante do Caeté e Ilhas Costeiras de Bragança around the Arena (PBR Water)
+    const seaWaterPbr = createTiledPbrTextures('water', 22, 22, maxAniso);
     const seaMat = new THREE.MeshStandardMaterial({
-      color: 0x0284c7,
-      roughness: 0.22,
-      metalness: 0.15,
+      map: seaWaterPbr.map,
+      bumpMap: seaWaterPbr.bumpMap,
+      bumpScale: seaWaterPbr.bumpScale,
+      roughness: seaWaterPbr.roughness,
+      metalness: 0.22,
     });
     const seaMesh = new THREE.Mesh(new THREE.PlaneGeometry(420, 420), seaMat);
     seaMesh.rotation.x = -Math.PI / 2;
@@ -414,6 +410,7 @@ export function SurvivalArenaGame({
     const HALF_D = 0.4;
 
     let waveIndex = 0;
+    let waveShownAtMs = performance.now();
     let phase: 'countdown' | 'shaking' | 'collapsed' | 'victory' | 'eliminated' = 'countdown';
     let timer = WAVE_COUNTDOWN_SECONDS;
     let sessionXp = 0;
@@ -523,6 +520,9 @@ export function SurvivalArenaGame({
       lavaTex.offset.x = (elapsed * 0.03) % 1;
       lavaTex.offset.y = (elapsed * 0.025) % 1;
       seaMesh.position.y = -6.65 + Math.sin(elapsed * 2.1) * 0.14;
+      seaWaterPbr.map.offset.x = (elapsed * 0.018) % 1;
+      seaWaterPbr.map.offset.y = (elapsed * 0.024) % 1;
+      seaWaterPbr.bumpMap.offset.copy(seaWaterPbr.map.offset);
 
       for (const hb of horizonBoats) {
         const ang = hb.baseAngle + elapsed * hb.speed;
@@ -559,6 +559,7 @@ export function SurvivalArenaGame({
           if (timer <= 0) {
             phase = 'collapsed';
             timer = 2.4;
+            recordAnsweredQuestion(student.id, currentQ.prompt);
             soundEngine.playTrapFall();
             for (const t of tiles) {
               if (t.optionIndex !== currentQ.correctIndex) {
@@ -592,6 +593,16 @@ export function SurvivalArenaGame({
               correctDelta: 1,
               streak,
             });
+            logQuestionAttempt({
+              studentId: student.id,
+              school: student.school,
+              grade: student.grade,
+              worldId,
+              gameMode: 'survival',
+              bnccTopic: currentQ.topic,
+              isCorrect: true,
+              responseTimeMs: Math.max(200, Math.round(performance.now() - waveShownAtMs)),
+            });
 
             if (waveIndex + 1 >= questions.length) {
               // Completed all 8 waves!
@@ -612,6 +623,7 @@ export function SurvivalArenaGame({
             } else {
               // Restore all 9 tiles for next wave
               waveIndex += 1;
+              waveShownAtMs = performance.now();
               soundEngine.setTowerIntensity(waveIndex >= 5);
               phase = 'countdown';
               timer = WAVE_COUNTDOWN_SECONDS;
@@ -702,6 +714,18 @@ export function SurvivalArenaGame({
           phase = 'eliminated';
           streak = 0;
           soundEngine.playTrapFall();
+          if (currentQ) {
+            logQuestionAttempt({
+              studentId: student.id,
+              school: student.school,
+              grade: student.grade,
+              worldId,
+              gameMode: 'survival',
+              bnccTopic: currentQ.topic,
+              isCorrect: false,
+              responseTimeMs: Math.max(200, Math.round(performance.now() - waveShownAtMs)),
+            });
+          }
           onProgressRef.current({
             xpGain: 0,
             coinsGain: 0,
@@ -746,6 +770,7 @@ export function SurvivalArenaGame({
         targetZ + Math.cos(cameraYaw) * hDist
       );
       camera.lookAt(targetX, targetY, targetZ);
+      envRig.updateShadowTarget(pos.x, Math.max(0, pos.y), pos.z);
 
       syncHud(false, elapsed);
       renderer.render(scene, camera);
@@ -766,46 +791,48 @@ export function SurvivalArenaGame({
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('resize', onResize);
       renderer.domElement.removeEventListener('pointerdown', onPointerDown);
-      renderer.dispose();
-      if (renderer.domElement.parentNode === container) {
-        container.removeChild(renderer.domElement);
-      }
+      disposeSceneResources(scene, renderer, envRig.envTexture);
     };
-  }, [runKey, worldId, difficulty, student.avatarColor, student.equippedHat, student.equippedJersey]);
+  }, [
+    runKey,
+    worldId,
+    difficulty,
+    student.id,
+    student.avatarColor,
+    student.equippedHat,
+    student.equippedJersey,
+    graphicsQuality,
+  ]);
 
   const q = hudState.question;
 
   return (
-    <div className="relative h-[100dvh] w-screen overflow-hidden bg-slate-950 select-none">
+    <div className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-slate-950 select-none">
       <div
         ref={mountRef}
         className="touch-none-select h-full w-full cursor-grab active:cursor-grabbing"
       />
 
-      {/* Top HUD Overlay */}
-      <div className="pointer-events-none fixed inset-x-0 top-0 z-20 flex flex-col gap-2 p-3 sm:p-4">
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-2">
-          <div className="pointer-events-auto flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onExit}
-              className="flex min-h-[42px] items-center gap-1.5 rounded-xl border border-white/15 bg-slate-900/90 px-3 py-2 text-xs font-bold text-slate-200 hover:bg-slate-800"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              <span>Praça / Menu</span>
-            </button>
-            <AudioSettingsButton />
-          </div>
-
-          <div className="flex items-center gap-2 rounded-2xl border border-amber-500/40 bg-slate-900/95 px-4 py-2">
-            <Flame className="h-4 w-4 text-amber-400" />
-            <span className="font-display text-xs sm:text-sm font-extrabold text-white">
+      {/* Ultra-Thin Translucent Top HUD (<= 15% mobile height) */}
+      <div className="pointer-events-none fixed inset-x-0 top-0 z-20 flex flex-col gap-1.5 px-2.5 pt-2 sm:px-4 sm:pt-3">
+        <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-900/60 px-2.5 py-1.5 backdrop-blur-sm shadow-lg">
+          {/* Left: Wave Counter */}
+          <div className="flex items-center gap-1.5 text-xs sm:text-sm font-extrabold text-white whitespace-nowrap tabular-nums">
+            <Flame className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+            <span className="font-display">
               Onda {hudState.waveIndex + 1}/{TOTAL_WAVES}
             </span>
-            <span className="mx-1 text-slate-600">|</span>
-            <Timer className="h-4 w-4 text-sky-400" />
+            <span className="hidden md:inline text-slate-400 font-normal">·</span>
+            <span className="hidden md:inline text-xs font-semibold text-amber-300">
+              {world.grade}
+            </span>
+          </div>
+
+          {/* Center: Countdown Timer */}
+          <div className="flex items-center gap-2 text-xs font-mono font-bold tabular-nums">
+            <Timer className="h-3.5 w-3.5 text-sky-400" />
             <span
-              className={`font-mono text-sm sm:text-base font-black tabular-nums ${
+              className={`text-sm font-black ${
                 hudState.timeLeft <= 3.5 ? 'text-rose-400 animate-pulse' : 'text-amber-300'
               }`}
             >
@@ -815,56 +842,74 @@ export function SurvivalArenaGame({
                   ? 'CAINDO!'
                   : 'LAVA!'}
             </span>
-          </div>
-
-          <div className="flex items-center gap-2 rounded-xl border border-white/15 bg-slate-900/90 px-3 py-2 font-mono text-xs font-bold tabular-nums">
-            <span className="text-emerald-400">+{hudState.sessionXp} XP</span>
-            <span className="text-amber-400 flex items-center gap-1">
+            <span className="hidden md:flex items-center gap-1 text-amber-300 ml-2">
               <Coins className="h-3.5 w-3.5" />+{hudState.sessionCoins}
             </span>
           </div>
+
+          {/* Right: Single Hamburger Menu Button */}
+          <div className="pointer-events-auto relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setMenuOpen((v) => !v)}
+              className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg border border-white/15 bg-slate-950/65 text-white hover:bg-slate-800 active:scale-95 transition-transform"
+              aria-label="Abrir menu"
+            >
+              {menuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+            </button>
+
+            {menuOpen && (
+              <div className="absolute right-0 top-10 z-50 flex w-48 flex-col gap-1 rounded-2xl border border-white/15 bg-slate-950/95 p-2 shadow-2xl backdrop-blur-md">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setAudioOpen(true);
+                  }}
+                  className="flex min-h-[40px] items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-slate-100 hover:bg-slate-800"
+                >
+                  <Sliders className="h-4 w-4 text-sky-400" />
+                  <span>Som &amp; Gráficos</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onExit();
+                  }}
+                  className="flex min-h-[40px] items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-rose-300 hover:bg-rose-500/15"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  <span>Sair para a Praça</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Question Banner with Options A, B, C */}
+        {/* Compact Semi-Transparent Question Card */}
         {q && hudState.phase !== 'victory' && hudState.phase !== 'eliminated' && (
-          <div className="mx-auto w-full max-w-3xl rounded-2xl border border-slate-700 bg-slate-950/95 p-3.5 sm:p-4 shadow-2xl">
-            <div className="flex items-center justify-between text-[11px] font-bold text-amber-400">
-              <span>
-                ARENA SOBREVIVÊNCIA · {world.grade.toUpperCase()} · {q.topic.toUpperCase()}
-              </span>
-              <span>
-                {hudState.standingLetter
-                  ? `Você está no piso [${hudState.standingLetter}]`
-                  : 'Corra para o piso A, B ou C!'}
-              </span>
-            </div>
-            <p className="mt-1 font-display text-sm sm:text-lg font-extrabold text-white">
+          <div className="mx-auto w-full max-w-xl rounded-xl border border-white/15 bg-slate-950/70 px-3 py-1.5 backdrop-blur-sm shadow-lg">
+            <p className="font-display text-xs sm:text-sm font-extrabold text-white text-center leading-snug line-clamp-2">
               {q.prompt}
             </p>
-            <div className="mt-2.5 grid grid-cols-3 gap-2">
+            <div className="mt-1 grid grid-cols-3 gap-1.5 text-[11px] sm:text-xs font-mono font-bold">
               {(['A', 'B', 'C'] as const).map((letter, idx) => {
                 const isStanding = hudState.standingLetter === letter;
                 const badgeBg =
                   letter === 'A'
-                    ? 'bg-blue-600'
+                    ? 'bg-blue-600/85 text-white'
                     : letter === 'B'
-                      ? 'bg-amber-600'
-                      : 'bg-purple-600';
+                      ? 'bg-amber-500/90 text-slate-950'
+                      : 'bg-purple-600/85 text-white';
                 return (
                   <div
                     key={letter}
-                    className={`flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-xs font-bold ${
-                      isStanding
-                        ? 'border-emerald-400 bg-emerald-500/20 text-white'
-                        : 'border-slate-800 bg-slate-900 text-slate-200'
+                    className={`rounded-lg px-1.5 py-0.5 text-center truncate transition-all ${badgeBg} ${
+                      isStanding ? 'ring-2 ring-white scale-[1.03]' : 'opacity-90'
                     }`}
                   >
-                    <span
-                      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md font-display text-xs font-black text-white ${badgeBg}`}
-                    >
-                      {letter}
-                    </span>
-                    <span className="truncate">{q.options[idx]}</span>
+                    {letter}: {q.options[idx]}
                   </div>
                 );
               })}
@@ -872,6 +917,8 @@ export function SurvivalArenaGame({
           </div>
         )}
       </div>
+
+      <AudioSettingsModal isOpen={audioOpen} onClose={() => setAudioOpen(false)} />
 
       {/* Eliminated Modal */}
       {hudState.phase === 'eliminated' && q && (

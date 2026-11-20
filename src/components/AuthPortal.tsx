@@ -3,6 +3,7 @@ import {
   KeyRound,
   Lock,
   Play,
+  RefreshCw,
   Search,
   ShieldAlert,
   UserCheck,
@@ -13,12 +14,16 @@ import {
 } from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
 import { AVATAR_COLOR_PALETTE } from '../data/shopItems';
+import { ORDERED_GRADES } from '../data/worlds';
+import { fetchStudentByIdFromCloud } from '../services/storageService';
 import { GradeLevel, StudentProfile } from '../types/game';
 
 interface AuthPortalProps {
   students: StudentProfile[];
   storageMode: 'supabase' | 'local';
-  onLoginStudent: (student: StudentProfile) => void;
+  lastStudentId: string | null;
+  onRefreshStudents: () => Promise<void>;
+  onLoginStudent: (student: StudentProfile) => Promise<void>;
   onRegisterStudent: (input: {
     name: string;
     school: string;
@@ -29,14 +34,7 @@ interface AuthPortalProps {
   onEnterAdmin: () => void;
 }
 
-const GRADE_OPTIONS: GradeLevel[] = [
-  '5º Ano',
-  '6º Ano',
-  '7º Ano',
-  '8º Ano',
-  '9º Ano',
-  'Trilha Base',
-];
+const GRADE_OPTIONS: GradeLevel[] = ORDERED_GRADES;
 
 const SCHOOL_SUGGESTIONS = [
   'CEJPII',
@@ -49,6 +47,8 @@ const SCHOOL_SUGGESTIONS = [
 export function AuthPortal({
   students,
   storageMode,
+  lastStudentId,
+  onRefreshStudents,
   onLoginStudent,
   onRegisterStudent,
   onEnterAdmin,
@@ -57,11 +57,24 @@ export function AuthPortal({
   const [audioSettings, setAudioSettings] = useState(() =>
     soundEngine.getSettings()
   );
+  const [refreshingList, setRefreshingList] = useState(false);
 
   useEffect(() => {
     soundEngine.startBgm('plaza');
     return soundEngine.subscribe((next) => setAudioSettings(next));
   }, []);
+
+  // Always pull fresh students directly from Supabase when AuthPortal opens
+  useEffect(() => {
+    let active = true;
+    setRefreshingList(true);
+    void onRefreshStudents().finally(() => {
+      if (active) setRefreshingList(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [onRefreshStudents]);
 
   const isMusicActive = !audioSettings.muted && audioSettings.bgmEnabled;
 
@@ -87,10 +100,12 @@ export function AuthPortal({
   const [gradeFilter, setGradeFilter] = useState<'Todos' | GradeLevel>('Todos');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedStudentId, setSelectedStudentId] = useState<string>(
-    students[0]?.id || 'stu-01'
+    lastStudentId || students[0]?.id || 'stu-01'
   );
   const [loginPin, setLoginPin] = useState('1234');
   const [loginError, setLoginError] = useState('');
+  const [submittingLogin, setSubmittingLogin] = useState(false);
+  const [continuingSession, setContinuingSession] = useState(false);
 
   // Sub-tab 2: Open Registration (Novo Aluno)
   const [regName, setRegName] = useState('');
@@ -105,6 +120,11 @@ export function AuthPortal({
   const [showTeacherModal, setShowTeacherModal] = useState(false);
   const [teacherPin, setTeacherPin] = useState('');
   const [teacherError, setTeacherError] = useState('');
+
+  const lastSessionStudent = useMemo(
+    () => (lastStudentId ? students.find((s) => s.id === lastStudentId) || null : null),
+    [students, lastStudentId]
+  );
 
   const filteredStudents = useMemo(() => {
     return students.filter((s) => {
@@ -128,14 +148,37 @@ export function AuthPortal({
     [students, selectedStudentId, filteredStudents]
   );
 
-  const handleStudentLogin = (e: React.FormEvent) => {
+  const handleQuickContinue = async () => {
+    if (!lastSessionStudent || continuingSession) return;
+    setContinuingSession(true);
+    setLoginError('');
+    try {
+      await onLoginStudent(lastSessionStudent);
+    } catch {
+      setLoginError('Não foi possível revalidar sua sessão na nuvem. Tente entrar novamente.');
+    } finally {
+      setContinuingSession(false);
+    }
+  };
+
+  const handleStudentLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedStudent) return;
-    if (loginPin.trim() === selectedStudent.pin) {
-      setLoginError('');
-      onLoginStudent(selectedStudent);
-    } else {
-      setLoginError('PIN incorreto para este aluno. O PIN inicial padrão é 1234.');
+    if (!selectedStudent || submittingLogin) return;
+    setSubmittingLogin(true);
+    setLoginError('');
+    try {
+      // Always fetch latest cloud row before verifying PIN so progress & PIN are 100% current
+      const freshCloud = await fetchStudentByIdFromCloud(selectedStudent.id);
+      const targetStudent = freshCloud || selectedStudent;
+      if (loginPin.trim() === targetStudent.pin) {
+        await onLoginStudent(targetStudent);
+      } else {
+        setLoginError('PIN incorreto para este aluno. O PIN inicial padrão é 1234.');
+      }
+    } catch {
+      setLoginError('Erro ao conectar à nuvem. Verifique sua internet e tente novamente.');
+    } finally {
+      setSubmittingLogin(false);
     }
   };
 
@@ -169,6 +212,12 @@ export function AuthPortal({
         pin: cleanPin,
         avatarColor: regColor,
       });
+    } catch (err) {
+      setRegError(
+        err instanceof Error
+          ? err.message
+          : 'Não foi possível salvar seu cadastro. Verifique sua internet e tente novamente.'
+      );
     } finally {
       setSubmittingReg(false);
     }
@@ -249,7 +298,7 @@ export function AuthPortal({
                     className="h-1.5 w-16 sm:w-22 cursor-pointer appearance-none rounded-full bg-slate-800 accent-emerald-400"
                   />
                   <span className="w-8 font-mono text-[11px] font-bold text-emerald-400 tabular-nums text-right">
-                    {Math.round(audioSettings.bgmVolume * 100)}%
+                    {Math.round(audioSettings.bgmVolume)}%
                   </span>
                 </div>
               ) : (
@@ -280,18 +329,56 @@ export function AuthPortal({
       <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6 sm:px-6 sm:py-10">
         <div className="text-center max-w-2xl mx-auto">
           <p className="text-xs sm:text-sm font-semibold text-sky-400">
-            Torre dos Desafios 3D · 5º ao 9º Ano e Trilha Base
+            Torre dos Desafios 3D · BNCC 1º ao 9º Ano e Trilha Base
           </p>
           <h1 className="mt-1.5 font-display text-2xl sm:text-4xl font-extrabold tracking-tight text-white [text-wrap:balance]">
             Portal do Aluno MathBlox
           </h1>
           <p className="mt-2 text-xs sm:text-sm text-slate-400">
-            Entre na sua conta para explorar a Praça MathBlox 3D, vestir a camisa do seu time e jogar as 3 modalidades com 50 BloxCoins iniciais.
+            Entre na sua conta para explorar a Praça da Bandeira 3D, vestir a camisa do seu time e jogar as 4 modalidades com 50 BloxCoins iniciais.
           </p>
         </div>
 
+        {/* Quick Continue Session Card (Revalidates latest cloud progress) */}
+        {lastSessionStudent && (
+          <div className="mx-auto mt-5 flex max-w-xl flex-col gap-3 rounded-2xl border border-emerald-500/40 bg-emerald-950/35 p-3.5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3 min-w-0">
+              <div
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl font-display text-lg font-extrabold text-white"
+                style={{ backgroundColor: lastSessionStudent.avatarColor }}
+              >
+                {lastSessionStudent.name.charAt(0).toUpperCase()}
+              </div>
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold text-emerald-300">
+                  Sessão anterior encontrada na nuvem
+                </p>
+                <p className="truncate font-display text-sm font-extrabold text-white">
+                  {lastSessionStudent.name}{' '}
+                  <span className="font-normal text-slate-300">
+                    · {lastSessionStudent.grade} · {lastSessionStudent.xp} XP
+                  </span>
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={continuingSession}
+              onClick={handleQuickContinue}
+              className="flex min-h-[42px] shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2 font-display text-xs font-extrabold text-slate-950 hover:bg-emerald-400 active:scale-[0.98] transition-all disabled:opacity-60 whitespace-nowrap"
+            >
+              <Play className="h-3.5 w-3.5 fill-current" />
+              <span>
+                {continuingSession
+                  ? 'Carregando da nuvem...'
+                  : `Continuar como ${lastSessionStudent.name}`}
+              </span>
+            </button>
+          </div>
+        )}
+
         {/* Two Responsive Sub-Tabs for Student Mode */}
-        <div className="mx-auto mt-6 flex max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-1">
+        <div className="mx-auto mt-5 flex max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-1">
           <button
             type="button"
             onClick={() => setStudentTab('login')}
@@ -324,9 +411,23 @@ export function AuthPortal({
             {/* Student Selector List */}
             <section className="lg:col-span-7 rounded-3xl border border-slate-800 bg-slate-900 p-4 sm:p-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <h2 className="font-display text-base font-bold text-white">
-                  1. Selecione seu Nome ({filteredStudents.length})
-                </h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="font-display text-base font-bold text-white">
+                    1. Selecione seu Nome ({filteredStudents.length})
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRefreshingList(true);
+                      void onRefreshStudents().finally(() => setRefreshingList(false));
+                    }}
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 text-slate-400 hover:text-sky-400 transition-colors"
+                    title="Atualizar lista de alunos da nuvem"
+                    aria-label="Atualizar lista de alunos da nuvem"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${refreshingList ? 'animate-spin text-sky-400' : ''}`} />
+                  </button>
+                </div>
 
                 <div className="relative flex-1 sm:max-w-xs">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
@@ -454,10 +555,11 @@ export function AuthPortal({
 
                   <button
                     type="submit"
-                    className="mt-5 flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl bg-emerald-500 px-6 py-3.5 font-display text-base font-extrabold text-slate-950 shadow-lg shadow-emerald-500/20 hover:bg-emerald-400 active:scale-[0.98] transition-all"
+                    disabled={submittingLogin}
+                    className="mt-5 flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl bg-emerald-500 px-6 py-3.5 font-display text-base font-extrabold text-slate-950 shadow-lg shadow-emerald-500/20 hover:bg-emerald-400 active:scale-[0.98] transition-all disabled:opacity-60"
                   >
                     <Play className="h-5 w-5 fill-current" />
-                    <span>JOGAR AGORA</span>
+                    <span>{submittingLogin ? 'CONECTANDO...' : 'JOGAR AGORA'}</span>
                   </button>
 
                   <p className="mt-4 text-center text-xs text-slate-400">
@@ -608,16 +710,22 @@ export function AuthPortal({
               </div>
 
               {regError && (
-                <p className="text-xs font-medium text-rose-400">{regError}</p>
+                <div className="rounded-xl border border-rose-500/50 bg-rose-950/60 px-3.5 py-2.5 text-xs font-semibold text-rose-200">
+                  {regError}
+                </div>
               )}
 
               <button
                 type="submit"
                 disabled={submittingReg}
-                className="mt-2 flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl bg-emerald-500 px-6 py-3.5 font-display text-base font-extrabold text-slate-950 shadow-lg shadow-emerald-500/20 hover:bg-emerald-400 active:scale-[0.98] transition-all disabled:opacity-50"
+                className="mt-2 flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl bg-emerald-500 px-6 py-3.5 font-display text-base font-extrabold text-slate-950 shadow-lg shadow-emerald-500/20 hover:bg-emerald-400 active:scale-[0.98] transition-all disabled:opacity-60"
               >
                 <UserPlus className="h-5 w-5" />
-                <span>CRIAR CONTA E JOGAR AGORA (+50 BloxCoins)</span>
+                <span>
+                  {submittingReg
+                    ? 'Salvando cadastro...'
+                    : 'CRIAR CONTA E JOGAR AGORA (+50 BloxCoins)'}
+                </span>
               </button>
             </div>
           </form>

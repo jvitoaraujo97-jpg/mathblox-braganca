@@ -1,10 +1,36 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { Car, DoorOpen, Flame, Footprints, MessageSquare, Smile, Users, Zap } from 'lucide-react';
+import {
+  Camera,
+  Car,
+  Coins,
+  DoorOpen,
+  Flame,
+  Footprints,
+  Gamepad2,
+  LogOut,
+  Maximize2,
+  Menu,
+  MessageSquare,
+  Minimize2,
+  ShoppingBag,
+  Sliders,
+  Smile,
+  Swords,
+  Target,
+  Trophy,
+  Users,
+  Volume2,
+  VolumeX,
+  X,
+} from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
-import { AudioSettingsButton } from '../components/AudioSettingsModal';
+import { AudioSettingsModal } from '../components/AudioSettingsModal';
 import { MobileControls, MobileInputState } from '../components/MobileControls';
+import {
+  countClaimableDailyMissions,
+  subscribeDailyMissions,
+} from '../data/missionsAndTitles';
 import { animateAvatarRig, AvatarRig, createAvatarRig } from '../game/avatarBuilder';
 import { PlazaPresenceManager } from '../services/presenceService';
 import {
@@ -14,13 +40,53 @@ import {
   OnlinePlayerPresence,
   StudentProfile,
 } from '../types/game';
+import { buildCosmeticRig } from './cosmeticBuilder';
+import {
+  createPbrRenderer,
+  disposeSceneResources,
+  getGraphicsQuality,
+  GraphicsQuality,
+  isSoftwareGl,
+  setupTropicalEnvironment,
+  subscribeGraphicsQuality,
+} from './graphicsEngine';
+import { getJerseyConfig } from './jerseyBuilder';
+import { createTiledPbrTextures } from './textureFactory';
 import { animateKartRig, createKartRig, KartRig, VehicleModelStyle } from './vehicleBuilder';
+
+type PlazaCameraMode = 'angular' | 'aerial' | 'action';
+
+const CAMERA_MODE_LABELS: Record<PlazaCameraMode, string> = {
+  angular: 'Angular',
+  aerial: 'Aérea',
+  action: 'Ação',
+};
+
+interface NearbyPortalInfo {
+  id:
+    | 'obby'
+    | 'survival'
+    | 'turbo_race'
+    | 'vehicle_rally'
+    | 'multiplayer'
+    | 'penalty'
+    | 'caete_boat'
+    | 'shop';
+  title: string;
+  subtitle: string;
+  colorHex: string;
+}
 
 interface SocialPlaza3DProps {
   student: StudentProfile;
   allStudents: StudentProfile[];
   onEnterGameMode: (mode: GameModeType) => void;
+  onOpenModes: () => void;
   onOpenShop: () => void;
+  onOpenRanking: () => void;
+  onOpenMultiplayer: () => void;
+  onOpenMissions: () => void;
+  onLogout: () => void;
   onUpdateStudent: (updated: StudentProfile) => void;
 }
 
@@ -119,17 +185,6 @@ function addDailyFarmedCoins(studentId: string, delta: number): number {
   }
 }
 
-const isSoftwareGl = (() => {
-  if (typeof document === 'undefined') return false;
-  const gl = document.createElement('canvas').getContext('webgl2');
-  if (!gl) return true;
-  const ext = gl.getExtension('WEBGL_debug_renderer_info');
-  const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
-  const gpu = String(gl.getParameter(param));
-  gl.getExtension('WEBGL_lose_context')?.loseContext();
-  return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
-})();
-
 const EMOTE_BUTTONS: { id: NonNullable<AvatarEmote>; label: string }[] = [
   { id: 'wave', label: '👋 Acenar' },
   { id: 'salute', label: '🫡 Continência' },
@@ -173,94 +228,45 @@ function getAuraLevel(auraPower = 0): number {
   return Math.max(1, Math.floor(auraPower / 10) + 1);
 }
 
-/**
- * 1. PISO DA PRAÇA MAIS ESCURO E COM TEXTURA REALISTA (CanvasTexture 512x512 em mosaico):
- * Cinza-ardósia / concreto escuro (#475569 com variação #334155 e #526071),
- * placas de piso intertravado/concreto com linhas de rejunte escuras (#1E293B) e granulação de pedra.
- */
-function createSlatePaverTexture(maxAniso = 4, repeatX = 18, repeatY = 18): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
-  const ctx = canvas.getContext('2d')!;
-
-  // Base em concreto escuro (#475569)
-  ctx.fillStyle = '#475569';
-  ctx.fillRect(0, 0, 512, 512);
-
-  const cols = 4;
-  const rows = 8;
-  const tileW = 512 / cols;
-  const tileH = 512 / rows;
-  const palette = ['#475569', '#334155', '#526071', '#3e4c5e', '#4b596b'];
-
-  for (let r = 0; r < rows; r++) {
-    const offsetX = (r % 2) * (tileW / 2);
-    for (let c = -1; c <= cols; c++) {
-      const x = c * tileW + offsetX;
-      const y = r * tileH;
-      const shade = palette[(r * 3 + Math.abs(c) * 2) % palette.length];
-
-      ctx.fillStyle = shade;
-      ctx.fillRect(x + 3, y + 3, tileW - 6, tileH - 6);
-
-      // Borda interna sutil de relevo na placa de concreto
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x + 5, y + 5, tileW - 10, tileH - 10);
-
-      // Linha de rejunte escura (#1E293B)
-      ctx.strokeStyle = '#1e293b';
-      ctx.lineWidth = 4;
-      ctx.strokeRect(x, y, tileW, tileH);
-    }
-  }
-
-  // Granulação realista de pedra/asfalto (speckle noise)
-  for (let i = 0; i < 1600; i++) {
-    const gx = (i * 97) % 512;
-    const gy = (i * 53 + (i % 7) * 19) % 512;
-    ctx.fillStyle = i % 2 === 0 ? 'rgba(15, 23, 42, 0.24)' : 'rgba(203, 213, 225, 0.12)';
-    ctx.fillRect(gx, gy, 2, 2);
-  }
-
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(repeatX, repeatY);
-  tex.anisotropy = maxAniso;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
-
 function createBillboardTexture(
   name: string,
   grade: string,
   school: string,
   auraPower = 0,
-  isFarming = false
+  isFarming = false,
+  equippedTitle?: string | null
 ): THREE.CanvasTexture {
+  const hasTitle = Boolean(equippedTitle && equippedTitle.trim());
   const canvas = document.createElement('canvas');
   canvas.width = 512;
-  canvas.height = 156;
+  canvas.height = hasTitle ? 186 : 156;
   const ctx = canvas.getContext('2d')!;
 
   ctx.fillStyle = isFarming ? 'rgba(8, 47, 73, 0.94)' : 'rgba(15, 23, 42, 0.90)';
   ctx.beginPath();
-  ctx.roundRect(8, 8, 496, 140, 24);
+  ctx.roundRect(8, 8, 496, canvas.height - 16, 24);
   ctx.fill();
   ctx.lineWidth = 5;
-  ctx.strokeStyle = isFarming ? '#00f5d4' : '#38bdf8';
+  ctx.strokeStyle = isFarming ? '#00f5d4' : hasTitle ? '#facc15' : '#38bdf8';
   ctx.stroke();
 
   ctx.fillStyle = '#ffffff';
-  ctx.font = '800 32px sans-serif';
+  ctx.font = '800 31px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(name.slice(0, 22), 256, 48);
+  ctx.fillText(name.slice(0, 22), 256, 46);
+
+  if (hasTitle) {
+    ctx.fillStyle = '#fde047';
+    ctx.font = '800 21px sans-serif';
+    ctx.fillText(equippedTitle!.slice(0, 30), 256, 78);
+  }
+
+  const gradeY = hasTitle ? 112 : 82;
+  const auraY = hasTitle ? 150 : 122;
 
   ctx.fillStyle = '#7dd3fc';
   ctx.font = '700 20px sans-serif';
-  ctx.fillText(`${grade} • ${school}`.slice(0, 34), 256, 82);
+  ctx.fillText(`${grade} • ${school}`.slice(0, 34), 256, gradeY);
 
   const auraLv = getAuraLevel(auraPower);
   ctx.fillStyle = isFarming ? '#fde047' : '#34d399';
@@ -270,7 +276,7 @@ function createBillboardTexture(
       ? `⚡ FARMANDO AURA • Nv. ${auraLv} (${auraPower} pts)`
       : `⚡ Aura Nv. ${auraLv} • ${auraPower} pts`,
     256,
-    122
+    auraY
   );
 
   const tex = new THREE.CanvasTexture(canvas);
@@ -321,25 +327,57 @@ function createPortalSignTexture(
   canvas.height = 192;
   const ctx = canvas.getContext('2d')!;
 
-  ctx.fillStyle = '#0f172a';
+  // Fundo sólido escuro #0F172A de alto contraste
+  ctx.fillStyle = '#0F172A';
   ctx.fillRect(0, 0, 512, 192);
+
+  // Brilho suave de fundo no topo com a cor do portal
+  const glowGrad = ctx.createLinearGradient(0, 0, 0, 192);
+  glowGrad.addColorStop(0, `${hexColor}26`);
+  glowGrad.addColorStop(0.55, 'rgba(15, 23, 42, 0)');
+  glowGrad.addColorStop(1, `${hexColor}1f`);
+  ctx.fillStyle = glowGrad;
+  ctx.fillRect(10, 10, 492, 172);
+
+  // Borda externa luminosa na cor do portal + filete interno branco
+  ctx.save();
+  ctx.shadowColor = hexColor;
+  ctx.shadowBlur = 14;
   ctx.lineWidth = 10;
   ctx.strokeStyle = hexColor;
   ctx.strokeRect(8, 8, 496, 176);
+  ctx.restore();
 
-  ctx.fillStyle = hexColor;
-  let fontSize = 36;
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+  ctx.strokeRect(18, 18, 476, 156);
+
+  // Título grande em negrito branco de altíssimo contraste (ícone + nome do modo)
+  let fontSize = 40;
   ctx.font = `900 ${fontSize}px sans-serif`;
-  while (ctx.measureText(title).width > 460 && fontSize > 20) {
+  while (ctx.measureText(title).width > 452 && fontSize > 22) {
     fontSize -= 2;
     ctx.font = `900 ${fontSize}px sans-serif`;
   }
   ctx.textAlign = 'center';
-  ctx.fillText(title, 256, 84);
+  ctx.textBaseline = 'middle';
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.85)';
+  ctx.shadowBlur = 8;
+  ctx.shadowOffsetY = 2;
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillText(title, 256, 78);
+  ctx.restore();
 
-  ctx.fillStyle = '#f8fafc';
-  ctx.font = '700 24px sans-serif';
-  ctx.fillText(subtitle, 256, 136);
+  // Subtítulo nítido na cor luminosa do portal / branco suave
+  let subSize = 25;
+  ctx.font = `800 ${subSize}px sans-serif`;
+  while (ctx.measureText(subtitle).width > 452 && subSize > 16) {
+    subSize -= 1;
+    ctx.font = `800 ${subSize}px sans-serif`;
+  }
+  ctx.fillStyle = hexColor;
+  ctx.fillText(subtitle, 256, 138);
 
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -712,18 +750,116 @@ export function SocialPlaza3D({
   student,
   allStudents,
   onEnterGameMode,
+  onOpenModes,
   onOpenShop,
+  onOpenRanking,
+  onOpenMultiplayer,
+  onOpenMissions,
+  onLogout,
   onUpdateStudent,
 }: SocialPlaza3DProps) {
   const mountRef = useRef<HTMLDivElement>(null);
+  const [graphicsQuality, setGraphicsQualityState] = useState<GraphicsQuality>(() =>
+    getGraphicsQuality()
+  );
   const [onlinePeers, setOnlinePeers] = useState<OnlinePlayerPresence[]>([]);
   const [rotateCameraSignal, setRotateCameraSignal] = useState(0);
+  const [cameraMode, setCameraMode] = useState<PlazaCameraMode>('angular');
+  const cameraModeRef = useRef<PlazaCameraMode>('angular');
+  cameraModeRef.current = cameraMode;
+
+  const [isPortrait, setIsPortrait] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerHeight > window.innerWidth : false
+  );
+  const isPortraitRef = useRef<boolean>(isPortrait);
+  isPortraitRef.current = isPortrait;
+
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [muted, setMuted] = useState<boolean>(() => soundEngine.muted);
+  const [nearbyPortal, setNearbyPortal] = useState<NearbyPortalInfo | null>(null);
+
   const [showChatMenu, setShowChatMenu] = useState(false);
+  const [socialDrawerOpen, setSocialDrawerOpen] = useState(false);
+  const [plazaMenuOpen, setPlazaMenuOpen] = useState(false);
+  const [audioModalOpen, setAudioModalOpen] = useState(false);
   const [activeEmote, setActiveEmote] = useState<AvatarEmote>(null);
   const [activeChatMsg, setActiveChatMsg] = useState<string | null>(null);
   const [isFarmingAura, setIsFarmingAura] = useState(false);
   const [auraToast, setAuraToast] = useState<string | null>(null);
   const [dailyAuraCoins, setDailyAuraCoins] = useState(() => getDailyFarmedCoins(student.id));
+  const [claimableMissions, setClaimableMissions] = useState(() =>
+    countClaimableDailyMissions(student.id)
+  );
+
+  useEffect(() => subscribeGraphicsQuality(setGraphicsQualityState), []);
+  useEffect(
+    () =>
+      soundEngine.subscribe((s) => {
+        setMuted(s.muted);
+      }),
+    []
+  );
+  useEffect(
+    () =>
+      subscribeDailyMissions(() => {
+        setClaimableMissions(countClaimableDailyMissions(student.id));
+      }),
+    [student.id]
+  );
+
+  useEffect(() => {
+    const onFsChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    const onOrientOrResize = () => {
+      const portrait = window.innerHeight > window.innerWidth;
+      isPortraitRef.current = portrait;
+      setIsPortrait(portrait);
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    window.addEventListener('resize', onOrientOrResize);
+    window.addEventListener('orientationchange', onOrientOrResize);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      window.removeEventListener('resize', onOrientOrResize);
+      window.removeEventListener('orientationchange', onOrientOrResize);
+    };
+  }, []);
+
+  const handleCycleCameraMode = () => {
+    setCameraMode((prev) => {
+      const next: PlazaCameraMode =
+        prev === 'angular' ? 'aerial' : prev === 'aerial' ? 'action' : 'angular';
+      cameraModeRef.current = next;
+      return next;
+    });
+  };
+
+  const handleToggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else if (document.documentElement.requestFullscreen) {
+        await document.documentElement.requestFullscreen();
+      } else {
+        setAuraToast('⛶ Modo tela cheia imersiva ativo!');
+        window.setTimeout(() => setAuraToast(null), 2200);
+      }
+    } catch {
+      setAuraToast('⛶ Tela cheia não suportada neste navegador.');
+      window.setTimeout(() => setAuraToast(null), 2200);
+    }
+  };
+
+  const handleToggleMute = () => {
+    const nextMuted = soundEngine.toggleMuteAll();
+    setMuted(nextMuted);
+  };
+
+  const equippedClub = useMemo(
+    () => getJerseyConfig(student.equippedJersey),
+    [student.equippedJersey]
+  );
 
   // Vehicle Driving State (v10.0)
   const [nearbyVehicle, setNearbyVehicle] = useState<PlazaVehicleDef | null>(null);
@@ -786,8 +922,20 @@ export function SocialPlaza3D({
   const enterVehicleRequestRef = useRef<string | null>(null);
   const exitVehicleRequestRef = useRef(false);
 
-  const callbacksRef = useRef({ onEnterGameMode, onOpenShop, onUpdateStudent });
-  callbacksRef.current = { onEnterGameMode, onOpenShop, onUpdateStudent };
+  const callbacksRef = useRef({
+    onEnterGameMode,
+    onOpenShop,
+    onOpenMultiplayer,
+    onOpenMissions,
+    onUpdateStudent,
+  });
+  callbacksRef.current = {
+    onEnterGameMode,
+    onOpenShop,
+    onOpenMultiplayer,
+    onOpenMissions,
+    onUpdateStudent,
+  };
 
   const generateMicroSpark = () => {
     const a = Math.floor(Math.random() * 8) + 2;
@@ -936,39 +1084,29 @@ export function SocialPlaza3D({
     const height = container.clientHeight || window.innerHeight;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x38bdf8);
-    scene.fog = new THREE.Fog(0xbae6fd, 68, 195);
 
-    const camera = new THREE.PerspectiveCamera(58, width / height, 0.2, 240);
-    const renderer = new THREE.WebGLRenderer({
-      antialias: !isSoftwareGl,
-      powerPreference: 'high-performance',
+    const initialPortrait = height > width;
+    const camera = new THREE.PerspectiveCamera(
+      initialPortrait ? 82 : 72,
+      width / height,
+      0.2,
+      260
+    );
+    const { renderer, maxAnisotropy: maxAniso } = createPbrRenderer(container, graphicsQuality);
+    const envRig = setupTropicalEnvironment(scene, renderer, {
+      fogColor: 0xd8f1fe,
+      fogDensity: 0.0042,
+      skyRadius: 240,
+      shadowFrustum: 38,
+      sunOffset: [28, 45, 24],
+      hemiIntensity: 0.88,
+      sunIntensity: 1.48,
+      quality: graphicsQuality,
     });
-    renderer.setSize(width, height);
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.08;
-    renderer.shadowMap.enabled = !isSoftwareGl;
-    container.appendChild(renderer.domElement);
-
-    const maxAniso = renderer.capabilities.getMaxAnisotropy();
-
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    pmrem.dispose();
-
-    const hemiLight = new THREE.HemisphereLight(0xe0f2fe, 0x334155, 0.95);
-    scene.add(hemiLight);
-
-    const sunLight = new THREE.DirectionalLight(0xfffbeb, 1.55);
-    sunLight.position.set(28, 45, 24);
-    sunLight.castShadow = !isSoftwareGl;
-    scene.add(sunLight);
 
     const sunDisc = new THREE.Mesh(
       new THREE.SphereGeometry(5.5, 20, 20),
-      new THREE.MeshBasicMaterial({ color: 0xfef08a })
+      new THREE.MeshBasicMaterial({ color: 0xfef08a, fog: false })
     );
     sunDisc.position.set(48, 52, -75);
     scene.add(sunDisc);
@@ -1011,24 +1149,31 @@ export function SocialPlaza3D({
     registerProp(-24.5, 11.5, 4.2);
 
     // =========================================================================
-    // 1. PISO DA PRAÇA MAIS ESCURO E COM TEXTURA REALISTA (#475569 / #334155 / #526071)
+    // 1. PISO DA PRAÇA PBR (#475569 / #334155 / #526071) + GRAMA PROCEDURAL PBR
     // =========================================================================
+    const outerGrassPbr = createTiledPbrTextures('grass', 26, 26, maxAniso);
     const outerTerrain = new THREE.Mesh(
       new THREE.PlaneGeometry(260, 260),
-      new THREE.MeshStandardMaterial({ color: 0x15803d, roughness: 0.9 })
+      new THREE.MeshStandardMaterial({
+        map: outerGrassPbr.map,
+        bumpMap: outerGrassPbr.bumpMap,
+        bumpScale: outerGrassPbr.bumpScale,
+        roughness: outerGrassPbr.roughness,
+      })
     );
     outerTerrain.rotation.x = -Math.PI / 2;
     outerTerrain.position.y = -0.18;
+    outerTerrain.receiveShadow = true;
     scene.add(outerTerrain);
 
-    const slateFloorTex = createSlatePaverTexture(maxAniso, 18, 18);
+    const pavementPbr = createTiledPbrTextures('pavement', 18, 18, maxAniso);
     const floorMesh = new THREE.Mesh(
       new THREE.BoxGeometry(63, 1.0, 63),
       new THREE.MeshStandardMaterial({
-        map: slateFloorTex,
-        bumpMap: slateFloorTex,
-        bumpScale: 0.045,
-        roughness: 0.85,
+        map: pavementPbr.map,
+        bumpMap: pavementPbr.bumpMap,
+        bumpScale: pavementPbr.bumpScale,
+        roughness: pavementPbr.roughness,
         metalness: 0.05,
       })
     );
@@ -1259,6 +1404,13 @@ export function SocialPlaza3D({
     const foliageMat1 = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.55 });
     const foliageMat2 = new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.55 });
     const treeCrowns: THREE.Group[] = [];
+    const occludableProps: {
+      x: number;
+      z: number;
+      radius: number;
+      materials: THREE.MeshStandardMaterial[];
+      currentOpacity: number;
+    }[] = [];
 
     const triangularBedPositions = [
       { x: -11.5, z: -9.5, rotY: Math.PI * 0.25, radius: 4.8, benchAngle: Math.PI * 0.75 },
@@ -1294,29 +1446,34 @@ export function SocialPlaza3D({
       // Colisor baixo do canteiro (0.38 <= STEP_HEIGHT 0.50)
       addCollider(tb.x, 0.19, tb.z, tb.radius * 1.05, 0.38, tb.radius * 1.05, true);
 
-      // 2.1. Árvore Frondosa posicionada ESTRITAMENTE no centro do canteiro de grama (radius: 2.8)
+      // Lista de obstáculos altos (árvores e postes) que ficam translúcidos entre câmera e avatar
+      // (inicializada no escopo da cena abaixo via array dedicado)
       registerProp(tb.x, tb.z, 2.8);
       const tGroup = new THREE.Group();
       tGroup.position.set(tb.x, 0.38, tb.z);
-      const trunk = new THREE.Mesh(new THREE.BoxGeometry(0.78, 2.9, 0.78), trunkMat);
+      const treeTrunkMat = trunkMat.clone();
+      const treeFoliageMatA = (idx % 2 === 0 ? foliageMat1 : foliageMat2).clone();
+      const treeFoliageMatB = (idx % 2 === 0 ? foliageMat2 : foliageMat1).clone();
+      const trunk = new THREE.Mesh(new THREE.BoxGeometry(0.78, 2.9, 0.78), treeTrunkMat);
       trunk.position.y = 1.45;
       tGroup.add(trunk);
 
       const crown = new THREE.Group();
       crown.position.y = 2.9;
-      const c1 = new THREE.Mesh(
-        new THREE.BoxGeometry(3.4, 2.1, 3.4),
-        idx % 2 === 0 ? foliageMat1 : foliageMat2
-      );
+      const c1 = new THREE.Mesh(new THREE.BoxGeometry(3.4, 2.1, 3.4), treeFoliageMatA);
       c1.position.y = 0.8;
-      const c2 = new THREE.Mesh(
-        new THREE.BoxGeometry(2.3, 1.7, 2.3),
-        idx % 2 === 0 ? foliageMat2 : foliageMat1
-      );
+      const c2 = new THREE.Mesh(new THREE.BoxGeometry(2.3, 1.7, 2.3), treeFoliageMatB);
       c2.position.y = 2.2;
       crown.add(c1, c2);
       tGroup.add(crown);
       treeCrowns.push(crown);
+      occludableProps.push({
+        x: tb.x,
+        z: tb.z,
+        radius: 2.6,
+        materials: [treeTrunkMat, treeFoliageMatA, treeFoliageMatB],
+        currentOpacity: 1,
+      });
       scene.add(tGroup);
       // Colisor sólido AABB do tronco da árvore
       addCollider(tb.x, 2.0, tb.z, 1.1, 4.0, 1.1, true);
@@ -1508,36 +1665,45 @@ export function SocialPlaza3D({
     bragancaSignGroup.add(signBoard);
     scene.add(bragancaSignGroup);
 
-    // Postes Azuis (#1D4ED8) com globos luminosos validados em placedProps
+    // Postes Azuis (#1D4ED8) afastados do corredor central de visão (spawn x=0, z=9 -> portais z=-26.5)
     const globeGlowMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       emissive: 0xfef08a,
       emissiveIntensity: 1.1,
     });
     const lampCoords = [
-      { x: -6.5, z: -15.5 },
-      { x: 6.5, z: -15.5 },
-      { x: -6.5, z: -3.5 },
-      { x: 6.5, z: -3.5 },
-      { x: -6.5, z: 14.5 },
-      { x: 6.5, z: 14.5 },
-      { x: -16.5, z: 18.0 },
-      { x: 16.5, z: 18.0 },
+      { x: -11.0, z: -15.5 },
+      { x: 11.0, z: -15.5 },
+      { x: -11.0, z: -3.5 },
+      { x: 11.0, z: -3.5 },
+      { x: -10.5, z: 14.5 },
+      { x: 10.5, z: 14.5 },
+      { x: -17.5, z: 18.0 },
+      { x: 17.5, z: 18.0 },
     ];
     for (const lc of lampCoords) {
       if (!canPlaceProp(lc.x, lc.z, 0.7)) continue;
       registerProp(lc.x, lc.z, 0.7);
       const lamp = new THREE.Group();
       lamp.position.set(lc.x, 0, lc.z);
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, 4.6, 10), bluePoleMat);
+      const poleMat = bluePoleMat.clone();
+      const lampGlobeMat = globeGlowMat.clone();
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, 4.6, 10), poleMat);
       pole.position.y = 2.3;
-      const crossArm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.12, 0.12), bluePoleMat);
+      const crossArm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.12, 0.12), poleMat);
       crossArm.position.y = 4.55;
-      const globeL = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 12), globeGlowMat);
+      const globeL = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 12), lampGlobeMat);
       globeL.position.set(-0.55, 4.75, 0);
-      const globeR = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 12), globeGlowMat);
+      const globeR = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 12), lampGlobeMat);
       globeR.position.set(0.55, 4.75, 0);
       lamp.add(pole, crossArm, globeL, globeR);
+      occludableProps.push({
+        x: lc.x,
+        z: lc.z,
+        radius: 1.8,
+        materials: [poleMat, lampGlobeMat],
+        currentOpacity: 1,
+      });
       scene.add(lamp);
       addCollider(lc.x, 2.3, lc.z, 0.55, 4.6, 0.55, true);
     }
@@ -1974,11 +2140,19 @@ export function SocialPlaza3D({
     scene.add(auraZoneGroup);
 
     // =========================================================================
-    // 5 PORTAIS TECNOLÓGICOS ALINHADOS (SEM TRILHA/TAPETE NO CHÃO)
+    // 8 PORTAIS TECNOLÓGICOS ALINHADOS (SEM TRILHA/TAPETE NO CHÃO)
     // =========================================================================
-    const PORTAL_Z = -26;
+    const PORTAL_Z = -26.5;
     const portalDefs: {
-      id: 'obby' | 'survival' | 'turbo_race' | 'vehicle_rally' | 'shop';
+      id:
+        | 'obby'
+        | 'survival'
+        | 'turbo_race'
+        | 'vehicle_rally'
+        | 'multiplayer'
+        | 'penalty'
+        | 'caete_boat'
+        | 'shop';
       title: string;
       subtitle: string;
       colorHex: string;
@@ -1988,47 +2162,74 @@ export function SocialPlaza3D({
     }[] = [
       {
         id: 'obby',
-        title: 'PORTAL VERDE',
-        subtitle: 'Torre Obby (Parkour)',
+        title: '🏔️ TORRE OBBY',
+        subtitle: 'Parkour 3D & Geometria',
         colorHex: '#10b981',
         colorNum: 0x10b981,
-        x: -18,
+        x: -22.4,
         z: PORTAL_Z,
       },
       {
         id: 'survival',
-        title: 'PORTAL LARANJA',
-        subtitle: 'Arena Sobrevivência',
+        title: '🔥 SOBREVIVÊNCIA',
+        subtitle: 'Arena do Piso que Cai',
         colorHex: '#f59e0b',
         colorNum: 0xf59e0b,
-        x: -9,
+        x: -16.0,
         z: PORTAL_Z,
       },
       {
         id: 'turbo_race',
-        title: 'PORTAL AZUL',
-        subtitle: 'Corrida Turbo (Tabuada)',
+        title: '⚡ CORRIDA TURBO',
+        subtitle: 'Tabuada na Orla',
         colorHex: '#0ea5e9',
         colorNum: 0x0ea5e9,
-        x: 0,
+        x: -9.6,
         z: PORTAL_Z,
       },
       {
         id: 'vehicle_rally',
-        title: 'PORTAL DOURADO',
-        subtitle: 'Rali de Kart 3D',
+        title: '🏎️ RALI DE KART',
+        subtitle: 'Drift & Praia de Ajuruteua',
         colorHex: '#facc15',
         colorNum: 0xfacc15,
-        x: 9,
+        x: -3.2,
+        z: PORTAL_Z,
+      },
+      {
+        id: 'multiplayer',
+        title: '⚔️ MULTIPLAYER',
+        subtitle: 'Kart 6P & Duelo 1v1',
+        colorHex: '#06b6d4',
+        colorNum: 0x06b6d4,
+        x: 3.2,
+        z: PORTAL_Z,
+      },
+      {
+        id: 'penalty',
+        title: '⚽ PÊNALTIS CAETÉ',
+        subtitle: 'Estádio do Caeté',
+        colorHex: '#22c55e',
+        colorNum: 0x22c55e,
+        x: 9.6,
+        z: PORTAL_Z,
+      },
+      {
+        id: 'caete_boat',
+        title: '🚤 REGATA CAETÉ',
+        subtitle: 'Voadeira · Tabuada Lógica',
+        colorHex: '#14b8a6',
+        colorNum: 0x14b8a6,
+        x: 16.0,
         z: PORTAL_Z,
       },
       {
         id: 'shop',
-        title: 'PORTAL ROXO',
-        subtitle: 'Vestiário & Loja de Times',
+        title: '👕 VESTIÁRIO',
+        subtitle: '19 Times & Acessórios',
         colorHex: '#a855f7',
         colorNum: 0xa855f7,
-        x: 18,
+        x: 22.4,
         z: PORTAL_Z,
       },
     ];
@@ -2051,13 +2252,13 @@ export function SocialPlaza3D({
       pGroup.position.set(p.x, 0, p.z);
 
       const techPad = new THREE.Mesh(
-        new THREE.CylinderGeometry(2.55, 2.85, 0.26, 28),
+        new THREE.CylinderGeometry(2.15, 2.45, 0.24, 24),
         darkFrameMat
       );
-      techPad.position.y = 0.13;
+      techPad.position.y = 0.12;
 
       const padNeonRing = new THREE.Mesh(
-        new THREE.TorusGeometry(2.52, 0.08, 12, 32),
+        new THREE.TorusGeometry(2.12, 0.08, 12, 28),
         new THREE.MeshStandardMaterial({
           color: p.colorNum,
           emissive: p.colorNum,
@@ -2065,37 +2266,37 @@ export function SocialPlaza3D({
         })
       );
       padNeonRing.rotation.x = Math.PI / 2;
-      padNeonRing.position.y = 0.27;
+      padNeonRing.position.y = 0.25;
 
       const outerFrame = new THREE.Mesh(
-        new THREE.TorusGeometry(2.38, 0.28, 14, 36),
+        new THREE.TorusGeometry(1.78, 0.22, 14, 32),
         darkFrameMat
       );
-      outerFrame.position.y = 2.65;
+      outerFrame.position.y = 2.02;
 
       const outerNeonRing = new THREE.Mesh(
-        new THREE.TorusGeometry(2.22, 0.11, 12, 36),
+        new THREE.TorusGeometry(1.66, 0.09, 12, 32),
         new THREE.MeshStandardMaterial({
           color: p.colorNum,
           emissive: p.colorNum,
           emissiveIntensity: 1.6,
         })
       );
-      outerNeonRing.position.set(0, 2.65, 0.14);
+      outerNeonRing.position.set(0, 2.02, 0.13);
 
       const innerNeonRing = new THREE.Mesh(
-        new THREE.TorusGeometry(1.68, 0.07, 12, 32),
+        new THREE.TorusGeometry(1.3, 0.065, 12, 28),
         new THREE.MeshStandardMaterial({
           color: 0xffffff,
           emissive: p.colorNum,
           emissiveIntensity: 1.8,
         })
       );
-      innerNeonRing.position.set(0, 2.65, -0.08);
+      innerNeonRing.position.set(0, 2.02, -0.07);
 
       const holoTex = createHologramGridTexture(p.colorHex);
       const holoCurtain = new THREE.Mesh(
-        new THREE.CircleGeometry(2.12, 32),
+        new THREE.CircleGeometry(1.62, 28),
         new THREE.MeshBasicMaterial({
           map: holoTex,
           transparent: true,
@@ -2103,28 +2304,35 @@ export function SocialPlaza3D({
           side: THREE.DoubleSide,
         })
       );
-      holoCurtain.position.y = 2.65;
+      holoCurtain.position.y = 2.02;
 
       const pMat = new THREE.MeshBasicMaterial({ color: p.colorNum });
-      const pGeo = new THREE.BoxGeometry(0.16, 0.16, 0.16);
+      const pGeo = new THREE.BoxGeometry(0.14, 0.14, 0.14);
       const portalParticles: { mesh: THREE.Mesh; baseAngle: number; speed: number; offset: number }[] = [];
-      for (let k = 0; k < 10; k++) {
+      for (let k = 0; k < 8; k++) {
         const pm = new THREE.Mesh(pGeo, pMat);
         pGroup.add(pm);
         portalParticles.push({
           mesh: pm,
-          baseAngle: (k / 10) * Math.PI * 2,
+          baseAngle: (k / 8) * Math.PI * 2,
           speed: 1.4 + (k % 3) * 0.4,
           offset: k * 0.45,
         });
       }
 
+      // Placa apoiada diretamente no topo do arco (y = 3.5) inclinada 12° para frente (legível de longe e de perto)
       const signTex = createPortalSignTexture(p.title, p.subtitle, p.colorHex);
       const signMesh = new THREE.Mesh(
-        new THREE.BoxGeometry(4.6, 1.75, 0.26),
-        new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.25 })
+        new THREE.BoxGeometry(4.0, 1.5, 0.22),
+        new THREE.MeshStandardMaterial({
+          map: signTex,
+          roughness: 0.22,
+          emissive: 0x0f172a,
+          emissiveIntensity: 0.22,
+        })
       );
-      signMesh.position.y = 5.75;
+      signMesh.position.set(0, 3.5, 0.34);
+      signMesh.rotation.x = THREE.MathUtils.degToRad(12);
 
       pGroup.add(
         techPad,
@@ -2256,6 +2464,7 @@ export function SocialPlaza3D({
 
     let lastRenderedAuraPower = student.auraPower || 0;
     let lastRenderedFarming = false;
+    let lastRenderedTitle: string | null = student.equippedTitle || null;
 
     const localLabelSprite = new THREE.Sprite(
       new THREE.SpriteMaterial({
@@ -2264,12 +2473,13 @@ export function SocialPlaza3D({
           student.grade,
           student.school,
           lastRenderedAuraPower,
-          lastRenderedFarming
+          lastRenderedFarming,
+          lastRenderedTitle
         ),
         transparent: true,
       })
     );
-    localLabelSprite.scale.set(3.8, 1.15, 1);
+    localLabelSprite.scale.set(3.8, lastRenderedTitle ? 1.32 : 1.15, 1);
     localLabelSprite.position.set(0, 3.25, 0);
     scene.add(localLabelSprite);
 
@@ -2281,7 +2491,7 @@ export function SocialPlaza3D({
     scene.add(localChatSprite);
     let lastRenderedChatMsg: string | null = null;
 
-    // Build Classmate / Online Peer Avatar Rigs in the Plaza
+    // Build Classmate Bots + Dynamic 60 FPS Real Online Peer Pool
     interface PeerEntity {
       id: string;
       rig: AvatarRig;
@@ -2310,12 +2520,13 @@ export function SocialPlaza3D({
             mate.grade,
             mate.school,
             (idx + 2) * 15,
-            isSimFarming
+            isSimFarming,
+            mate.equippedTitle || null
           ),
           transparent: true,
         })
       );
-      label.scale.set(3.5, 1.05, 1);
+      label.scale.set(3.5, mate.equippedTitle ? 1.24 : 1.05, 1);
       label.position.set(0, 3.25, 0);
       rig.root.add(label);
 
@@ -2337,7 +2548,27 @@ export function SocialPlaza3D({
       });
     });
 
-    // Connect Realtime Presence Manager
+    // Dynamic Real Online Peers (spawned/interpolated at 60 FPS for EVERY connected student)
+    interface LiveOnlinePeerEntity {
+      id: string;
+      group: THREE.Group;
+      avatarRig: AvatarRig;
+      kartRig: KartRig | null;
+      kartStyle: VehicleModelStyle | null;
+      labelSprite: THREE.Sprite;
+      chatSprite: THREE.Sprite;
+      lastChat: string | null;
+      lastTitle: string | null;
+      lastAuraPower: number;
+      lastFarming: boolean;
+      curPos: THREE.Vector3;
+      curRotY: number;
+      lastSeenMs: number;
+    }
+    const dynamicOnlinePeers = new Map<string, LiveOnlinePeerEntity>();
+    const _peerTargetPos = new THREE.Vector3();
+
+    // Connect Realtime Presence Manager (Presence Metadata + 15 Hz Broadcast 'player_state')
     const initialPresence: OnlinePlayerPresence = {
       id: student.id,
       name: student.name,
@@ -2346,10 +2577,15 @@ export function SocialPlaza3D({
       avatarColor: student.avatarColor,
       equippedHat: student.equippedHat || null,
       equippedJersey: student.equippedJersey || null,
+      equippedBack: student.equippedBack || null,
+      equippedAura: student.equippedAura || null,
+      equippedTitle: student.equippedTitle || null,
       movementStyle: student.movementStyle || 'classic',
       auraPower: student.auraPower || 0,
       isFarmingAura: false,
       drivingVehicleId: null,
+      isDriving: false,
+      vehicleType: null,
       x: 0,
       y: 0,
       z: 9,
@@ -2379,10 +2615,15 @@ export function SocialPlaza3D({
     const STEP_HEIGHT = 0.5;
     let portalTriggered = false;
     let lastNearbyVehicleId: string | null = null;
+    let lastNearbyPortalId: string | null = null;
 
     let cameraYaw = 0;
-    let cameraPitch = 0.42;
-    const CAM_DIST = 11.5;
+    let cameraPitchOffset = 0;
+    let curFov = initialPortrait ? 82 : 72;
+    let curCamDist = 10.5;
+    let curCamHeight = 5.2;
+    let curLookY = 2.4;
+    let curLookFwd = 3.5;
 
     const keys = new Set<string>();
     let prevJumpTouch = false;
@@ -2407,7 +2648,7 @@ export function SocialPlaza3D({
       lastCamX = e.clientX;
       lastCamY = e.clientY;
       cameraYawTargetRef.current -= dx * 0.0065;
-      cameraPitch = THREE.MathUtils.clamp(cameraPitch + dy * 0.005, 0.18, 1.05);
+      cameraPitchOffset = THREE.MathUtils.clamp(cameraPitchOffset + dy * 0.004, -0.24, 0.45);
     };
     const onPointerUp = (e: PointerEvent) => {
       if (e.pointerId === camPointerId) {
@@ -2426,11 +2667,13 @@ export function SocialPlaza3D({
       if (!container) return;
       const w = container.clientWidth || window.innerWidth;
       const h = container.clientHeight || window.innerHeight;
+      isPortraitRef.current = h > w;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
     };
     window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
 
     let lastBroadcast = 0;
     const clock = new THREE.Clock();
@@ -2820,19 +3063,27 @@ export function SocialPlaza3D({
 
       const activeFarming = !activeVehicle && isFarmingRef.current && horizSpeed < 1.5;
 
-      // Refresh local overhead billboard if Aura Power or farming state changed
+      // Refresh local overhead billboard if Aura Power, farming state, or equippedTitle changed
       const curAuraPower = studentRef.current.auraPower || 0;
-      if (curAuraPower !== lastRenderedAuraPower || activeFarming !== lastRenderedFarming) {
+      const curEquippedTitle = studentRef.current.equippedTitle || null;
+      if (
+        curAuraPower !== lastRenderedAuraPower ||
+        activeFarming !== lastRenderedFarming ||
+        curEquippedTitle !== lastRenderedTitle
+      ) {
         lastRenderedAuraPower = curAuraPower;
         lastRenderedFarming = activeFarming;
+        lastRenderedTitle = curEquippedTitle;
         const lMat = localLabelSprite.material as THREE.SpriteMaterial;
         lMat.map = createBillboardTexture(
           studentRef.current.name,
           studentRef.current.grade,
           studentRef.current.school,
           curAuraPower,
-          activeFarming
+          activeFarming,
+          curEquippedTitle
         );
+        localLabelSprite.scale.set(3.8, curEquippedTitle ? 1.32 : 1.15, 1);
         lMat.needsUpdate = true;
       }
 
@@ -2893,25 +3144,44 @@ export function SocialPlaza3D({
         );
       }
 
-      // Check Physical Portal Entry along z = -26
-      if (!portalTriggered) {
-        for (const p of portalDefs) {
-          const dist = Math.hypot(pos.x - p.x, pos.z - p.z);
-          if (dist < 2.4) {
-            portalTriggered = true;
-            soundEngine.playCheckpoint();
-            if (p.id === 'shop') {
-              callbacksRef.current.onOpenShop();
-            } else {
-              callbacksRef.current.onEnterGameMode(p.id);
-            }
-            break;
+      // Check Physical Portal Proximity (< 4.5u HUD card) & Entry (< 2.25u) along z = -26.5
+      let closestPortal: NearbyPortalInfo | null = null;
+      let closestPortalDist = 4.5;
+      for (const p of portalDefs) {
+        const dist = Math.hypot(pos.x - p.x, pos.z - p.z);
+        if (dist < closestPortalDist) {
+          closestPortalDist = dist;
+          closestPortal = {
+            id: p.id,
+            title: p.title,
+            subtitle: p.subtitle,
+            colorHex: p.colorHex,
+          };
+        }
+        if (!portalTriggered && dist < 2.25) {
+          portalTriggered = true;
+          soundEngine.playCheckpoint();
+          if (p.id === 'shop') {
+            callbacksRef.current.onOpenShop();
+          } else if (p.id === 'multiplayer') {
+            callbacksRef.current.onOpenMultiplayer();
+            window.setTimeout(() => {
+              portalTriggered = false;
+            }, 2000);
+          } else {
+            callbacksRef.current.onEnterGameMode(p.id);
           }
+          break;
         }
       }
+      const nextPortalId = closestPortal ? closestPortal.id : null;
+      if (nextPortalId !== lastNearbyPortalId) {
+        lastNearbyPortalId = nextPortalId;
+        setNearbyPortal(closestPortal);
+      }
 
-      // Broadcast Local Presence every 200ms (including drivingVehicleId)
-      if (elapsed - lastBroadcast > 0.2) {
+      // Update Local Realtime Presence (throttled internally to 15 Hz Broadcast only when moving/changed)
+      if (elapsed - lastBroadcast >= 0.066) {
         lastBroadcast = elapsed;
         presence.updateLocal({
           name: studentRef.current.name,
@@ -2920,58 +3190,209 @@ export function SocialPlaza3D({
           avatarColor: studentRef.current.avatarColor,
           equippedHat: studentRef.current.equippedHat || null,
           equippedJersey: studentRef.current.equippedJersey || null,
+          equippedBack: studentRef.current.equippedBack || null,
+          equippedAura: studentRef.current.equippedAura || null,
+          equippedTitle: curEquippedTitle,
           movementStyle: studentRef.current.movementStyle || 'classic',
           auraPower: curAuraPower,
           isFarmingAura: activeFarming,
           drivingVehicleId: activeVehId,
+          isDriving: Boolean(activeVehId),
+          vehicleType: activeVehicle ? activeVehicle.def.style : null,
           x: pos.x,
           y: pos.y,
           z: pos.z,
           rotY: localRig.root.rotation.y,
+          isMoving: horizSpeed > 0.35,
           emote: currentEmote,
           chatMessage: currentChat,
         });
       }
 
-      // Animate Classmates & Real Online Peers in the Plaza
-      let idx = 0;
-      peerEntities.forEach((pe) => {
-        const livePeer = onlinePeersRef.current.find((op) => op.id === pe.id);
-        if (livePeer) {
-          pe.rig.root.position.lerp(new THREE.Vector3(livePeer.x, livePeer.y, livePeer.z), 0.25);
-          pe.rig.root.rotation.y = livePeer.rotY;
+      // =====================================================================
+      // 60 FPS REALTIME ONLINE PEER INTERPOLATION & CLEANUP (> 10s STALE)
+      // =====================================================================
+      const livePeersList = onlinePeersRef.current;
+      const livePeerIds = new Set<string>();
+      const lerpAlpha = Math.min(1, delta * 12);
 
-          // Update peer chat bubble & play meme sound if peer just sent "Fá!"
-          const peerChatActive =
-            livePeer.chatMessage && now - livePeer.chatTimestamp < 4200
-              ? livePeer.chatMessage
-              : null;
-          if (peerChatActive !== pe.lastChat) {
-            pe.lastChat = peerChatActive;
-            const cMat = pe.chatSprite.material as THREE.SpriteMaterial;
-            if (peerChatActive) {
-              cMat.map = createSpeechBubbleTexture(peerChatActive);
-              cMat.opacity = 1;
-              if (peerChatActive.includes('Fá!')) {
-                soundEngine.playMemeFaSound();
-              }
-            } else {
-              cMat.opacity = 0;
-            }
-            cMat.needsUpdate = true;
+      for (const lp of livePeersList) {
+        if (lp.id === student.id) continue;
+        livePeerIds.add(lp.id);
+        let entry = dynamicOnlinePeers.get(lp.id);
+
+        if (!entry) {
+          const group = new THREE.Group();
+          const avatarRig = createAvatarRig(
+            lp.avatarColor || '#38bdf8',
+            lp.equippedHat || null,
+            lp.equippedJersey || null
+          );
+          if (lp.equippedBack) {
+            avatarRig.hatContainer.add(buildCosmeticRig(lp.equippedBack).group);
           }
+          if (lp.equippedAura) {
+            avatarRig.hatContainer.add(buildCosmeticRig(lp.equippedAura).group);
+          }
+          group.add(avatarRig.root);
 
+          const labelSprite = new THREE.Sprite(
+            new THREE.SpriteMaterial({
+              map: createBillboardTexture(
+                lp.name,
+                lp.grade,
+                lp.school,
+                lp.auraPower || 0,
+                Boolean(lp.isFarmingAura),
+                lp.equippedTitle || null
+              ),
+              transparent: true,
+            })
+          );
+          labelSprite.scale.set(3.6, lp.equippedTitle ? 1.28 : 1.1, 1);
+          labelSprite.position.set(0, 3.25, 0);
+          group.add(labelSprite);
+
+          const chatSprite = new THREE.Sprite(
+            new THREE.SpriteMaterial({ transparent: true, opacity: 0 })
+          );
+          chatSprite.scale.set(4.0, 1.1, 1);
+          chatSprite.position.set(0, 4.35, 0);
+          group.add(chatSprite);
+
+          group.position.set(lp.x, lp.y, lp.z);
+          scene.add(group);
+
+          entry = {
+            id: lp.id,
+            group,
+            avatarRig,
+            kartRig: null,
+            kartStyle: null,
+            labelSprite,
+            chatSprite,
+            lastChat: null,
+            lastTitle: lp.equippedTitle || null,
+            lastAuraPower: lp.auraPower || 0,
+            lastFarming: Boolean(lp.isFarmingAura),
+            curPos: new THREE.Vector3(lp.x, lp.y, lp.z),
+            curRotY: lp.rotY,
+            lastSeenMs: now,
+          };
+          dynamicOnlinePeers.set(lp.id, entry);
+        }
+
+        entry.lastSeenMs = lp.updatedAt || now;
+
+        // Smooth 60 FPS Position Lerp + Derived Velocity
+        const prevX = entry.curPos.x;
+        const prevZ = entry.curPos.z;
+        _peerTargetPos.set(lp.x, lp.y, lp.z);
+        entry.curPos.lerp(_peerTargetPos, lerpAlpha);
+        const derivedSpeed = Math.hypot(entry.curPos.x - prevX, entry.curPos.z - prevZ) / Math.max(delta, 0.001);
+        entry.group.position.copy(entry.curPos);
+
+        // Shortest-Arc Rotation Interpolation
+        let rotDiff = lp.rotY - entry.curRotY;
+        while (rotDiff > Math.PI) rotDiff -= Math.PI * 2;
+        while (rotDiff < -Math.PI) rotDiff += Math.PI * 2;
+        entry.curRotY += rotDiff * lerpAlpha;
+
+        // Toggle between Walking AvatarRig vs Driving KartRig
+        const peerDriving = Boolean(lp.isDriving || lp.drivingVehicleId);
+        if (peerDriving) {
+          const desiredStyle = (lp.vehicleType as VehicleModelStyle) || 'sport_kart';
+          if (!entry.kartRig || entry.kartStyle !== desiredStyle) {
+            if (entry.kartRig) entry.group.remove(entry.kartRig.root);
+            entry.kartRig = createKartRig(
+              lp.avatarColor || '#38bdf8',
+              lp.equippedHat || null,
+              lp.equippedJersey || null,
+              desiredStyle
+            );
+            entry.kartStyle = desiredStyle;
+            entry.group.add(entry.kartRig.root);
+          }
+          entry.avatarRig.root.visible = false;
+          entry.kartRig.root.visible = true;
+          entry.kartRig.root.rotation.y = entry.curRotY;
+          animateKartRig(entry.kartRig, derivedSpeed, 0, derivedSpeed > 12, 0, elapsed, delta);
+        } else {
+          entry.avatarRig.root.visible = true;
+          if (entry.kartRig) entry.kartRig.root.visible = false;
+          entry.avatarRig.root.rotation.y = entry.curRotY;
           animateAvatarRig(
-            pe.rig,
-            livePeer.isMoving ? 4.5 : 0,
-            true,
+            entry.avatarRig,
+            Math.max(derivedSpeed, lp.isMoving ? 4.2 : 0),
+            entry.curPos.y <= 0.12,
             elapsed,
             delta,
-            livePeer.emote,
-            livePeer.movementStyle || 'classic',
-            Boolean(livePeer.isFarmingAura)
+            lp.emote,
+            lp.movementStyle || 'classic',
+            Boolean(lp.isFarmingAura)
           );
-        } else if (pe.isSimFarming) {
+        }
+
+        // Refresh Peer Billboard if Title / Aura / Farming changed
+        const peerTitle = lp.equippedTitle || null;
+        if (
+          peerTitle !== entry.lastTitle ||
+          (lp.auraPower || 0) !== entry.lastAuraPower ||
+          Boolean(lp.isFarmingAura) !== entry.lastFarming
+        ) {
+          entry.lastTitle = peerTitle;
+          entry.lastAuraPower = lp.auraPower || 0;
+          entry.lastFarming = Boolean(lp.isFarmingAura);
+          const lMat = entry.labelSprite.material as THREE.SpriteMaterial;
+          lMat.map = createBillboardTexture(
+            lp.name,
+            lp.grade,
+            lp.school,
+            entry.lastAuraPower,
+            entry.lastFarming,
+            peerTitle
+          );
+          entry.labelSprite.scale.set(3.6, peerTitle ? 1.28 : 1.1, 1);
+          lMat.needsUpdate = true;
+        }
+
+        // Peer Speech Bubble + "Fá!" Audio Sync
+        const peerChatActive =
+          lp.chatMessage && now - lp.chatTimestamp < 4200 ? lp.chatMessage : null;
+        if (peerChatActive !== entry.lastChat) {
+          entry.lastChat = peerChatActive;
+          const cMat = entry.chatSprite.material as THREE.SpriteMaterial;
+          if (peerChatActive) {
+            cMat.map = createSpeechBubbleTexture(peerChatActive);
+            cMat.opacity = 1;
+            if (peerChatActive.includes('Fá!')) {
+              soundEngine.playMemeFaSound();
+            }
+          } else {
+            cMat.opacity = 0;
+          }
+          cMat.needsUpdate = true;
+        }
+      }
+
+      // Auto-remove disconnected or silent (> 10s) peers cleanly from scene
+      for (const [peerId, entry] of dynamicOnlinePeers.entries()) {
+        if (!livePeerIds.has(peerId) || now - entry.lastSeenMs > 10000) {
+          scene.remove(entry.group);
+          dynamicOnlinePeers.delete(peerId);
+        }
+      }
+
+      // Animate Simulated Classmate Bots (hidden if real player with same ID is online)
+      let idx = 0;
+      peerEntities.forEach((pe) => {
+        const isLiveOnline = livePeerIds.has(pe.id);
+        pe.rig.root.visible = !isLiveOnline;
+        if (isLiveOnline) {
+          idx++;
+          return;
+        }
+        if (pe.isSimFarming) {
           pe.rig.root.position.set(pe.baseX, 0.25, pe.baseZ);
           animateAvatarRig(pe.rig, 0, true, elapsed + pe.phase, delta, null, 'levitate', true);
         } else {
@@ -3003,19 +3424,96 @@ export function SocialPlaza3D({
         idx++;
       });
 
-      // Camera Chase
-      const camDist = activeVehicle ? 14.0 : CAM_DIST;
-      const targetX = pos.x;
-      const targetY = pos.y + (activeVehicle ? 2.1 : 1.85);
-      const targetZ = pos.z;
-      const hDist = Math.cos(cameraPitch) * camDist;
-      const vDist = Math.sin(cameraPitch) * camDist;
-      camera.position.set(
-        targetX + Math.sin(cameraYaw) * hDist,
-        targetY + vDist,
-        targetZ + Math.cos(cameraYaw) * hDist
-      );
-      camera.lookAt(targetX, targetY, targetZ);
+      // =====================================================================
+      // 3 MODOS DE CÂMERA + TRANSIÇÃO SUAVE (LERP) + FOV PORTRAIT AUTOMÁTICO
+      // =====================================================================
+      const camMode = cameraModeRef.current;
+      const portraitNow = isPortraitRef.current;
+      const fovBoost = portraitNow ? 10 : 0;
+
+      let tgtFov = 72 + fovBoost;
+      let tgtDist = activeVehicle ? 13.0 : 10.5;
+      let tgtHeight = activeVehicle ? 6.0 : 5.2;
+      let tgtLookY = 2.4;
+      let tgtLookFwd = 3.5;
+
+      if (camMode === 'aerial') {
+        tgtFov = 64 + fovBoost;
+        tgtDist = 13.0;
+        tgtHeight = 17.0;
+        tgtLookY = 1.2;
+        tgtLookFwd = 1.0;
+      } else if (camMode === 'action') {
+        tgtFov = 56 + fovBoost;
+        tgtDist = activeVehicle ? 8.2 : 5.0;
+        tgtHeight = activeVehicle ? 3.4 : 2.6;
+        tgtLookY = 1.85;
+        tgtLookFwd = 2.2;
+      }
+
+      const camLerp = Math.min(1, delta * 7.0);
+      curFov = THREE.MathUtils.lerp(curFov, tgtFov, camLerp);
+      curCamDist = THREE.MathUtils.lerp(curCamDist, tgtDist, camLerp);
+      curCamHeight = THREE.MathUtils.lerp(curCamHeight, tgtHeight, camLerp);
+      curLookY = THREE.MathUtils.lerp(curLookY, tgtLookY, camLerp);
+      curLookFwd = THREE.MathUtils.lerp(curLookFwd, tgtLookFwd, camLerp);
+
+      if (Math.abs(camera.fov - curFov) > 0.05) {
+        camera.fov = curFov;
+        camera.updateProjectionMatrix();
+      }
+
+      const sinYaw = Math.sin(cameraYaw);
+      const cosYaw = Math.cos(cameraYaw);
+      const camX = pos.x + sinYaw * curCamDist;
+      const camY = Math.max(1.4, pos.y + curCamHeight + cameraPitchOffset * curCamDist * 0.45);
+      const camZ = pos.z + cosYaw * curCamDist;
+      camera.position.set(camX, camY, camZ);
+
+      // Ponto de visão elevado + deslocado à frente (horizonte aberto e placas legíveis)
+      const lookX = pos.x - sinYaw * curLookFwd;
+      const lookY = pos.y + curLookY;
+      const lookZ = pos.z - cosYaw * curLookFwd;
+      camera.lookAt(lookX, lookY, lookZ);
+      envRig.updateShadowTarget(pos.x, pos.y, pos.z);
+
+      // Anti-obstrução suave: reduz opacidade (0.22) de postes e árvores entre a câmera e o avatar
+      const segX = pos.x - camX;
+      const segZ = pos.z - camZ;
+      const segLenSq = segX * segX + segZ * segZ;
+      if (segLenSq > 0.25) {
+        for (let oi = 0; oi < occludableProps.length; oi++) {
+          const prop = occludableProps[oi];
+          const t = ((prop.x - camX) * segX + (prop.z - camZ) * segZ) / segLenSq;
+          let occluded = false;
+          if (t > 0.06 && t < 0.94) {
+            const projX = camX + t * segX;
+            const projZ = camZ + t * segZ;
+            const distSq = (prop.x - projX) ** 2 + (prop.z - projZ) ** 2;
+            if (distSq < prop.radius * prop.radius) {
+              occluded = true;
+            }
+          }
+          const desiredOpacity = occluded ? 0.22 : 1.0;
+          if (Math.abs(prop.currentOpacity - desiredOpacity) > 0.01) {
+            prop.currentOpacity = THREE.MathUtils.lerp(
+              prop.currentOpacity,
+              desiredOpacity,
+              Math.min(1, delta * 10)
+            );
+            const isTrans = prop.currentOpacity < 0.98;
+            for (let mi = 0; mi < prop.materials.length; mi++) {
+              const mat = prop.materials[mi];
+              if (mat.transparent !== isTrans) {
+                mat.transparent = isTrans;
+                mat.needsUpdate = true;
+              }
+              mat.opacity = prop.currentOpacity;
+              mat.depthWrite = prop.currentOpacity > 0.8;
+            }
+          }
+        }
+      }
 
       renderer.render(scene, camera);
 
@@ -3035,11 +3533,9 @@ export function SocialPlaza3D({
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
       renderer.domElement.removeEventListener('pointerdown', onPointerDown);
-      renderer.dispose();
-      if (renderer.domElement.parentNode === container) {
-        container.removeChild(renderer.domElement);
-      }
+      disposeSceneResources(scene, renderer, envRig.envTexture);
     };
   }, [
     student.id,
@@ -3048,6 +3544,7 @@ export function SocialPlaza3D({
     student.equippedJersey,
     top3Students,
     simulatedClassmates,
+    graphicsQuality,
   ]);
 
   const totalOnlineCount = 1 + Math.max(onlinePeers.length, simulatedClassmates.length);
@@ -3057,144 +3554,516 @@ export function SocialPlaza3D({
     ? PLAZA_VEHICLES.find((v) => v.id === drivingVehicleId) || null
     : null;
 
+  const handleEnterNearbyPortal = () => {
+    if (!nearbyPortal) return;
+    soundEngine.playCheckpoint();
+    if (nearbyPortal.id === 'shop') {
+      onOpenShop();
+    } else if (nearbyPortal.id === 'multiplayer') {
+      onOpenMultiplayer();
+    } else {
+      onEnterGameMode(nearbyPortal.id);
+    }
+  };
+
   return (
-    <div className="relative h-[70dvh] min-h-[500px] w-full overflow-hidden rounded-3xl border border-slate-800 bg-slate-950 shadow-2xl select-none">
+    <div className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-slate-950 select-none">
       <div
         ref={mountRef}
         className="touch-none-select h-full w-full cursor-grab active:cursor-grabbing"
       />
 
-      {/* Top Overlay: Online Counter, Aura Level Badge & Aligned Portal Shortcuts */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex flex-col gap-2 p-3 sm:p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-2 rounded-2xl border border-emerald-500/40 bg-slate-950/90 px-3 py-1.5 shadow-lg">
-              <Users className="h-4 w-4 text-emerald-400" />
-              <span className="font-display text-xs font-extrabold text-white">
-                🟢 {totalOnlineCount} Alunos Online
-              </span>
+      {/* 2 Pílulas Superiores Translúcidas Flutuantes (100vw × 100dvh, Paisagem 1 linha / Vertical 2 linhas) */}
+      <div className="pointer-events-none fixed inset-x-0 top-3 z-30 flex flex-col gap-1.5 px-2.5 sm:px-4">
+        <div
+          className={`flex gap-2 ${
+            isPortrait
+              ? 'flex-col items-stretch'
+              : 'flex-row items-center justify-between'
+          }`}
+        >
+          {/* PÍLULA SUPERIOR ESQUERDA: Avatar + Nome + Série + XP + BloxCoins + ☰ Menu */}
+          <div className="pointer-events-auto relative flex items-center justify-between gap-2 rounded-2xl border border-white/15 bg-slate-900/75 px-2.5 py-1.5 shadow-xl backdrop-blur-md">
+            <div className="flex items-center gap-2 min-w-0">
+              <div
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-white/25 font-display text-xs font-black text-white shadow-inner"
+                style={{
+                  backgroundColor: equippedClub ? equippedClub.primary : student.avatarColor,
+                }}
+              >
+                {equippedClub ? equippedClub.shortTag : student.name.charAt(0).toUpperCase()}
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="max-w-[115px] sm:max-w-[160px] truncate text-xs font-extrabold text-white">
+                    {student.name}
+                  </span>
+                  <span className="shrink-0 text-[10px] font-bold text-sky-300">
+                    {student.grade}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 font-mono text-[10px] font-bold tabular-nums">
+                  <span className="text-emerald-400">{student.xp} XP</span>
+                  <span className="flex items-center gap-0.5 text-amber-300">
+                    <Coins className="h-3 w-3 shrink-0" />
+                    {student.coins}
+                  </span>
+                </div>
+              </div>
             </div>
 
-            <div className="flex items-center gap-1.5 rounded-2xl border border-cyan-400/50 bg-slate-950/90 px-3 py-1.5 shadow-lg">
-              <Zap className="h-3.5 w-3.5 text-cyan-400" />
-              <span className="font-mono text-xs font-extrabold text-cyan-300">
-                ⚡ Aura Nv. {currentAuraLv} ({student.auraPower || 0} pts)
-              </span>
-            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setPlazaMenuOpen((v) => !v);
+                setSocialDrawerOpen(false);
+              }}
+              className={`flex min-h-[34px] items-center gap-1 rounded-xl border px-2.5 py-1 text-xs font-extrabold transition-colors whitespace-nowrap shrink-0 ${
+                plazaMenuOpen
+                  ? 'border-sky-300 bg-sky-400 text-slate-950'
+                  : 'border-white/15 bg-slate-950/75 text-white hover:bg-slate-800'
+              }`}
+              aria-label="Abrir menu da praça"
+            >
+              {plazaMenuOpen ? <X className="h-3.5 w-3.5" /> : <Menu className="h-3.5 w-3.5" />}
+              <span>Menu</span>
+            </button>
+
+            {/* Drawer / Modal Limpo do Menu Principal */}
+            {plazaMenuOpen && (
+              <div className="absolute left-0 top-12 z-50 flex w-64 max-h-[72dvh] overflow-y-auto flex-col gap-1 rounded-2xl border border-white/15 bg-slate-950/95 p-2.5 shadow-2xl backdrop-blur-md">
+                <p className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Navegação Rápida
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onOpenModes();
+                  }}
+                  className="flex min-h-[38px] items-center gap-2 rounded-xl bg-sky-500/15 px-3 py-1.5 text-xs font-black text-sky-300 hover:bg-sky-500/25"
+                >
+                  <Gamepad2 className="h-4 w-4 shrink-0" />
+                  <span>6 Modalidades (Jogar)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onOpenShop();
+                  }}
+                  className="flex min-h-[38px] items-center gap-2 rounded-xl bg-purple-500/15 px-3 py-1.5 text-xs font-black text-purple-300 hover:bg-purple-500/25"
+                >
+                  <ShoppingBag className="h-4 w-4 shrink-0" />
+                  <span>Vestiário &amp; Times (19)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onOpenRanking();
+                  }}
+                  className="flex min-h-[38px] items-center gap-2 rounded-xl bg-amber-500/15 px-3 py-1.5 text-xs font-black text-amber-300 hover:bg-amber-500/25"
+                >
+                  <Trophy className="h-4 w-4 shrink-0" />
+                  <span>Ranking &amp; Batalha de Colégios</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onOpenMultiplayer();
+                  }}
+                  className="flex min-h-[38px] items-center gap-2 rounded-xl bg-cyan-500/15 px-3 py-1.5 text-xs font-black text-cyan-300 hover:bg-cyan-500/25"
+                >
+                  <Swords className="h-4 w-4 shrink-0" />
+                  <span>Arena Multiplayer</span>
+                </button>
+
+                <div className="my-1 border-t border-slate-800" />
+                <p className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Portais Diretos
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onEnterGameMode('caete_boat');
+                  }}
+                  className="flex min-h-[34px] items-center rounded-xl px-3 py-1 text-xs font-bold text-teal-300 hover:bg-teal-500/15"
+                >
+                  🚤 Regata no Rio Caeté
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onEnterGameMode('vehicle_rally');
+                  }}
+                  className="flex min-h-[34px] items-center rounded-xl px-3 py-1 text-xs font-bold text-yellow-300 hover:bg-yellow-500/15"
+                >
+                  🏎️ Rali de Kart (Ajuruteua)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onEnterGameMode('penalty');
+                  }}
+                  className="flex min-h-[34px] items-center rounded-xl px-3 py-1 text-xs font-bold text-emerald-300 hover:bg-emerald-500/15"
+                >
+                  ⚽ Pênaltis da Matemática
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onEnterGameMode('obby');
+                  }}
+                  className="flex min-h-[34px] items-center rounded-xl px-3 py-1 text-xs font-bold text-emerald-300 hover:bg-emerald-500/15"
+                >
+                  🏔️ Torre Obby 3D
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onEnterGameMode('survival');
+                  }}
+                  className="flex min-h-[34px] items-center rounded-xl px-3 py-1 text-xs font-bold text-amber-300 hover:bg-amber-500/15"
+                >
+                  🔥 Arena Sobrevivência
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onEnterGameMode('turbo_race');
+                  }}
+                  className="flex min-h-[34px] items-center rounded-xl px-3 py-1 text-xs font-bold text-sky-300 hover:bg-sky-500/15"
+                >
+                  ⚡ Corrida Turbo
+                </button>
+
+                <div className="my-1 border-t border-slate-800" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    setAudioModalOpen(true);
+                  }}
+                  className="flex min-h-[36px] items-center gap-2 rounded-xl px-3 py-1 text-xs font-bold text-slate-100 hover:bg-slate-800"
+                >
+                  <Sliders className="h-3.5 w-3.5 text-sky-400" />
+                  <span>Som &amp; Gráficos 3D</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlazaMenuOpen(false);
+                    onLogout();
+                  }}
+                  className="flex min-h-[36px] items-center gap-2 rounded-xl px-3 py-1 text-xs font-bold text-rose-300 hover:bg-rose-500/15"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  <span>Trocar Conta / Sair</span>
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* Instant Aligned Portal Quick-Teleport Buttons */}
-          <div className="pointer-events-auto flex flex-wrap items-center gap-1.5">
+          {/* PÍLULA SUPERIOR DIREITA: 📷 Câmera, 💬 Social, 🎯 Missões, ⛶ Tela Cheia, 🔊 */}
+          <div className="pointer-events-auto flex items-center justify-between sm:justify-end gap-1 rounded-2xl border border-white/15 bg-slate-900/75 px-2 py-1.5 shadow-xl backdrop-blur-md">
             <button
               type="button"
-              onClick={handleToggleFarmAuraButton}
-              className={`flex items-center gap-1 rounded-xl border px-3 py-1.5 text-[11px] font-black transition-all ${
-                isFarmingAura
-                  ? 'border-cyan-300 bg-cyan-400 text-slate-950 shadow-lg shadow-cyan-400/30'
-                  : 'border-cyan-400/60 bg-slate-950/90 text-cyan-300 hover:bg-cyan-400 hover:text-slate-950'
+              onClick={handleCycleCameraMode}
+              className="flex min-h-[34px] items-center gap-1 rounded-xl border border-sky-400/40 bg-sky-500/15 px-2.5 py-1 text-[11px] font-extrabold text-sky-200 hover:bg-sky-400 hover:text-slate-950 active:scale-95 transition-all whitespace-nowrap shrink-0"
+              title="Alternar modo de câmera (Angular / Aérea / Ação)"
+            >
+              <Camera className="h-3.5 w-3.5 shrink-0" />
+              <span>{CAMERA_MODE_LABELS[cameraMode]}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setSocialDrawerOpen((v) => !v);
+                setPlazaMenuOpen(false);
+              }}
+              className={`flex min-h-[34px] items-center gap-1 rounded-xl border px-2.5 py-1 text-[11px] font-extrabold transition-colors whitespace-nowrap shrink-0 ${
+                socialDrawerOpen || isFarmingAura
+                  ? 'border-cyan-300 bg-cyan-400 text-slate-950'
+                  : 'border-white/15 bg-slate-950/70 text-white hover:bg-slate-800'
               }`}
+              aria-label="Abrir painel social"
             >
-              <Flame className="h-3.5 w-3.5" />
-              <span>{isFarmingAura ? '⚡ Farmando Aura (Ativo)' : '⚡ Farmar Aura'}</span>
+              <MessageSquare className="h-3.5 w-3.5 shrink-0" />
+              <span>Social</span>
+              <span className="hidden sm:inline-flex items-center gap-0.5 rounded-md bg-emerald-500/20 px-1 text-[10px] font-mono text-emerald-300">
+                <Users className="h-2.5 w-2.5" />
+                {totalOnlineCount}
+              </span>
             </button>
 
             <button
               type="button"
-              onClick={() => onEnterGameMode('obby')}
-              className="rounded-xl border border-emerald-500/50 bg-slate-950/90 px-2.5 py-1.5 text-[11px] font-bold text-emerald-300 hover:bg-emerald-500 hover:text-slate-950 transition-colors"
+              onClick={onOpenMissions}
+              className="relative flex min-h-[34px] items-center gap-1 rounded-xl border border-amber-400/50 bg-amber-500/15 px-2.5 py-1 text-[11px] font-extrabold text-amber-200 hover:bg-amber-400 hover:text-slate-950 transition-colors whitespace-nowrap shrink-0"
+              title="Missões Diárias & Títulos"
             >
-              🟢 Torre Obby
-            </button>
-            <button
-              type="button"
-              onClick={() => onEnterGameMode('survival')}
-              className="rounded-xl border border-amber-500/50 bg-slate-950/90 px-2.5 py-1.5 text-[11px] font-bold text-amber-300 hover:bg-amber-400 hover:text-slate-950 transition-colors"
-            >
-              🟠 Piso que Cai
-            </button>
-            <button
-              type="button"
-              onClick={() => onEnterGameMode('turbo_race')}
-              className="rounded-xl border border-sky-500/50 bg-slate-950/90 px-2.5 py-1.5 text-[11px] font-bold text-sky-300 hover:bg-sky-400 hover:text-slate-950 transition-colors"
-            >
-              🔵 Corrida Tabuada
-            </button>
-            <button
-              type="button"
-              onClick={() => onEnterGameMode('vehicle_rally')}
-              className="rounded-xl border border-amber-300/60 bg-slate-950/90 px-2.5 py-1.5 text-[11px] font-bold text-yellow-300 hover:bg-yellow-400 hover:text-slate-950 transition-colors"
-            >
-              🟡 Rali de Kart 3D
-            </button>
-            <button
-              type="button"
-              onClick={onOpenShop}
-              className="rounded-xl border border-purple-500/50 bg-slate-950/90 px-2.5 py-1.5 text-[11px] font-bold text-purple-300 hover:bg-purple-400 hover:text-slate-950 transition-colors"
-            >
-              🟣 Loja & Times
+              <Target className="h-3.5 w-3.5 shrink-0" />
+              <span className="hidden xs:inline sm:inline">Missões</span>
+              {claimableMissions > 0 && (
+                <span className="inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-emerald-400 px-1 text-[10px] font-black text-slate-950">
+                  {claimableMissions}
+                </span>
+              )}
             </button>
 
-            <AudioSettingsButton compact />
+            <button
+              type="button"
+              onClick={() => void handleToggleFullscreen()}
+              className="flex h-[34px] w-[34px] items-center justify-center rounded-xl border border-white/15 bg-slate-950/70 text-slate-100 hover:bg-slate-800 active:scale-95 transition-all shrink-0"
+              aria-label="Alternar tela cheia"
+              title={isFullscreen ? 'Sair da Tela Cheia' : 'Tela Cheia'}
+            >
+              {isFullscreen ? (
+                <Minimize2 className="h-3.5 w-3.5 text-sky-300" />
+              ) : (
+                <Maximize2 className="h-3.5 w-3.5 text-sky-300" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleToggleMute}
+              className="flex h-[34px] w-[34px] items-center justify-center rounded-xl border border-white/15 bg-slate-950/70 text-slate-100 hover:bg-slate-800 active:scale-95 transition-all shrink-0"
+              aria-label={muted ? 'Ativar som' : 'Silenciar som'}
+              title={muted ? 'Ativar som' : 'Silenciar som'}
+            >
+              {muted ? (
+                <VolumeX className="h-3.5 w-3.5 text-rose-400" />
+              ) : (
+                <Volume2 className="h-3.5 w-3.5 text-emerald-400" />
+              )}
+            </button>
           </div>
         </div>
 
-        {/* Aura Farming Active Panel & Micro-Challenge */}
-        {isFarmingAura && (
-          <div className="pointer-events-auto mx-auto flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-cyan-400/60 bg-slate-950/95 px-4 py-2.5 shadow-2xl max-w-2xl w-full">
-            <div>
-              <p className="text-xs font-extrabold text-cyan-300">
-                ⚡ Modo Farmar Aura Ativo (+2 BloxCoins a cada 10s · Hoje: {dailyAuraCoins}/{DAILY_AURA_MAX_COINS} Coins)
-              </p>
-              <p className="text-[11px] text-slate-300">
-                Seu avatar está levitando e emanando o dobro de energia na Praça!
-              </p>
+        {/* Retractable Social Drawer: Multiplayer, Missões, Farmar Aura, Emotes, Estilos & Chat */}
+        {socialDrawerOpen && (
+          <div className="pointer-events-auto ml-auto w-full max-w-[300px] max-h-[58dvh] overflow-y-auto rounded-2xl border border-white/15 bg-slate-950/92 p-3 shadow-2xl backdrop-blur-md space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-extrabold text-cyan-300">
+                Social ({totalOnlineCount} online) · Aura Nv. {currentAuraLv}
+              </span>
+              <button
+                type="button"
+                onClick={() => setSocialDrawerOpen(false)}
+                className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-800 text-slate-300 hover:text-white"
+                aria-label="Fechar painel social"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
             </div>
 
-            {microSpark && (
-              <div className="flex items-center gap-2 rounded-xl border border-amber-400/40 bg-slate-900 px-3 py-1.5">
-                <span className="text-xs font-bold text-amber-300">{microSpark.prompt}</span>
-                {microSpark.options.map((opt, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => handleAnswerMicroSpark(idx as 0 | 1)}
-                    className="rounded-lg bg-amber-400 px-2.5 py-1 font-mono text-xs font-black text-slate-950 hover:bg-amber-300 active:scale-95"
-                  >
-                    {opt}
-                  </button>
-                ))}
+            {/* Compact Multiplayer & Daily Missions Quick Actions */}
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setSocialDrawerOpen(false);
+                  onOpenMultiplayer();
+                }}
+                className="flex min-h-[38px] items-center justify-center gap-1 rounded-xl border border-cyan-400/60 bg-gradient-to-r from-cyan-500/25 to-blue-500/25 px-2 py-1.5 text-[11px] font-black text-cyan-200 hover:bg-cyan-400 hover:text-slate-950 transition-all"
+              >
+                <span>⚔️ Jogar com Amigos</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSocialDrawerOpen(false);
+                  onOpenMissions();
+                }}
+                className="relative flex min-h-[38px] items-center justify-center gap-1 rounded-xl border border-amber-400/60 bg-amber-500/20 px-2 py-1.5 text-[11px] font-black text-amber-200 hover:bg-amber-400 hover:text-slate-950 transition-all"
+              >
+                <span>🎯 Missões</span>
+                {claimableMissions > 0 && (
+                  <span className="inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-emerald-400 px-1 text-[10px] font-black text-slate-950">
+                    {claimableMissions}
+                  </span>
+                )}
+              </button>
+            </div>
+
+            {/* Farmar Aura */}
+            <button
+              type="button"
+              onClick={handleToggleFarmAuraButton}
+              className={`flex w-full min-h-[38px] items-center justify-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-black transition-all ${
+                isFarmingAura
+                  ? 'border-cyan-300 bg-cyan-400 text-slate-950'
+                  : 'border-cyan-400/50 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-400 hover:text-slate-950'
+              }`}
+            >
+              <Flame className="h-3.5 w-3.5" />
+              <span>
+                {isFarmingAura
+                  ? `Farmando Aura (${dailyAuraCoins}/${DAILY_AURA_MAX_COINS} Coins)`
+                  : 'Ativar Farmar Aura'}
+              </span>
+            </button>
+
+            {/* Movement Styles */}
+            {!drivingVehicleId && (
+              <div>
+                <p className="mb-1 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  <Footprints className="h-3 w-3 text-sky-400" />
+                  Estilo de Passo
+                </p>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {MOVEMENT_STYLE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => handleSelectMovementStyle(opt.id)}
+                      className={`min-h-[32px] rounded-lg px-2 py-1 text-[11px] font-bold transition-all ${
+                        currentMoveStyle === opt.id
+                          ? 'bg-sky-500 text-slate-950 font-extrabold'
+                          : 'bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
+
+            {/* Emotes + Viral 1-Click Buttons */}
+            <div>
+              <p className="mb-1 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <Smile className="h-3 w-3 text-amber-400" />
+                Emotes &amp; Sons
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {EMOTE_BUTTONS.map((btn) => (
+                  <button
+                    key={btn.id}
+                    type="button"
+                    onClick={() => triggerEmote(btn.id)}
+                    className={`min-h-[32px] rounded-lg px-2 py-1 text-[11px] font-bold transition-all active:scale-95 ${
+                      activeEmote === btn.id
+                        ? 'bg-amber-400 text-slate-950'
+                        : 'bg-slate-900 text-slate-200 border border-slate-800 hover:bg-slate-800'
+                    }`}
+                  >
+                    {btn.label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => triggerQuickChat('Fá! 🎺💥')}
+                  className="min-h-[32px] rounded-lg border border-rose-500/70 bg-gradient-to-r from-rose-600 to-amber-500 px-2.5 py-1 text-[11px] font-black text-white active:scale-95"
+                >
+                  🎺 Fá! 💥
+                </button>
+                <button
+                  type="button"
+                  onClick={() => triggerQuickChat('Obrigado, meu prefeito! 🫡🏛️')}
+                  className="min-h-[32px] rounded-lg border border-amber-400/60 bg-amber-500/20 px-2.5 py-1 text-[11px] font-extrabold text-amber-200 active:scale-95"
+                >
+                  🫡 Meu Prefeito!
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Chat Phrases */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowChatMenu((v) => !v)}
+                className={`flex w-full min-h-[34px] items-center justify-between rounded-lg px-2.5 py-1 text-[11px] font-extrabold transition-all ${
+                  showChatMenu || activeChatMsg
+                    ? 'bg-sky-500 text-slate-950'
+                    : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                }`}
+              >
+                <span>Frases Rápidas ({QUICK_CHAT_PHRASES.length})</span>
+                <span>{showChatMenu ? '▲' : '▼'}</span>
+              </button>
+              {showChatMenu && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {QUICK_CHAT_PHRASES.map((phrase) => (
+                    <button
+                      key={phrase}
+                      type="button"
+                      onClick={() => {
+                        triggerQuickChat(phrase);
+                        setSocialDrawerOpen(false);
+                      }}
+                      className="rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 text-[11px] font-bold text-slate-100 hover:border-sky-400"
+                    >
+                      “{phrase}”
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Compact Aura Farming Micro-Challenge */}
+        {isFarmingAura && microSpark && (
+          <div className="pointer-events-auto mx-auto flex items-center gap-2 rounded-xl border border-amber-400/50 bg-slate-950/85 px-3 py-1.5 shadow-xl backdrop-blur-sm">
+            <span className="text-xs font-extrabold text-amber-300">{microSpark.prompt}</span>
+            {microSpark.options.map((opt, idx) => (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => handleAnswerMicroSpark(idx as 0 | 1)}
+                className="rounded-lg bg-amber-400 px-2.5 py-1 font-mono text-xs font-black text-slate-950 hover:bg-amber-300 active:scale-95"
+              >
+                {opt}
+              </button>
+            ))}
           </div>
         )}
 
         {auraToast && (
-          <div className="mx-auto rounded-xl border border-cyan-400 bg-cyan-950/95 px-4 py-1.5 text-xs font-extrabold text-cyan-200 shadow-lg">
+          <div className="mx-auto rounded-lg border border-cyan-400/70 bg-cyan-950/90 px-3 py-1 text-xs font-extrabold text-cyan-200 shadow-lg">
             {auraToast}
           </div>
         )}
       </div>
 
-      {/* Bottom Social Dock: Vehicle Controls, Movement Styles, Emotes & Safe Quick-Chat */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex flex-col items-center gap-1.5 px-3">
-        {/* Botão de Entrar no Veículo quando próximo (< 3.5u) */}
+      {/* Zona Segura Inferior Elevada (>= 112px): Cartão de Proximidade de Portal + Controles de Veículo */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-[calc(114px+env(safe-area-inset-bottom))] z-[55] flex flex-col items-center gap-2 px-4">
+        {nearbyPortal && !drivingVehicleId && (
+          <button
+            type="button"
+            onClick={handleEnterNearbyPortal}
+            className="pointer-events-auto flex items-center gap-2 rounded-2xl border-2 bg-slate-950/90 px-4 py-2.5 text-xs sm:text-sm font-black text-white shadow-2xl backdrop-blur-md active:scale-95 transition-transform"
+            style={{ borderColor: nearbyPortal.colorHex }}
+          >
+            <span>🚪 Aproxime-se para entrar:</span>
+            <span style={{ color: nearbyPortal.colorHex }}>{nearbyPortal.title}</span>
+          </button>
+        )}
+
         {nearbyVehicle && !drivingVehicleId && (
           <button
             type="button"
             onClick={handleEnterNearbyVehicle}
-            className="pointer-events-auto flex items-center gap-2 rounded-2xl border-2 border-amber-300 bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 px-5 py-2.5 font-display text-sm font-black text-slate-950 shadow-2xl shadow-amber-400/40 hover:scale-105 active:scale-95 transition-transform"
+            className="pointer-events-auto flex items-center gap-2 rounded-2xl border-2 border-amber-300 bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 px-4 py-2 font-display text-xs sm:text-sm font-black text-slate-950 shadow-2xl active:scale-95 transition-transform"
           >
-            <Car className="h-5 w-5" />
-            <span>🚗 Dirigir Veículo ({nearbyVehicle.name})</span>
+            <Car className="h-4 w-4" />
+            <span>Dirigir ({nearbyVehicle.name})</span>
           </button>
         )}
 
-        {/* Painel de Direção quando dentro de um Veículo (ACELERAR, FREAR/RÉ, SAIR DO VEÍCULO) */}
         {drivingVehicleId && activeVehicleDef && (
-          <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2 rounded-2xl border border-sky-400/70 bg-slate-950/95 px-4 py-2 shadow-2xl">
-            <span className="text-xs font-black text-sky-300">
-              🏎️ {activeVehicleDef.name}
-            </span>
+          <div className="pointer-events-auto flex items-center justify-center gap-2 rounded-2xl border border-sky-400/70 bg-slate-950/90 px-3 py-2 shadow-2xl backdrop-blur-sm">
             <button
               type="button"
               onPointerDown={() => {
@@ -3206,9 +4075,12 @@ export function SocialPlaza3D({
               onPointerLeave={() => {
                 driveControlsRef.current.throttle = false;
               }}
-              className="rounded-xl bg-emerald-400 px-4 py-2 font-display text-xs font-black text-slate-950 shadow-md active:scale-95"
+              onPointerCancel={() => {
+                driveControlsRef.current.throttle = false;
+              }}
+              className="rounded-xl bg-emerald-400 px-3.5 py-2 font-display text-xs font-black text-slate-950 shadow-md active:scale-95 touch-none"
             >
-              🟢 ACELERAR
+              ACELERAR
             </button>
             <button
               type="button"
@@ -3221,9 +4093,12 @@ export function SocialPlaza3D({
               onPointerLeave={() => {
                 driveControlsRef.current.brakeReverse = false;
               }}
-              className="rounded-xl bg-amber-400 px-3.5 py-2 font-display text-xs font-black text-slate-950 shadow-md active:scale-95"
+              onPointerCancel={() => {
+                driveControlsRef.current.brakeReverse = false;
+              }}
+              className="rounded-xl bg-amber-400 px-3 py-2 font-display text-xs font-black text-slate-950 shadow-md active:scale-95 touch-none"
             >
-              🔴 FREAR / RÉ
+              FREAR
             </button>
             <button
               type="button"
@@ -3231,113 +4106,16 @@ export function SocialPlaza3D({
               className="flex items-center gap-1 rounded-xl border border-rose-400/60 bg-rose-500/20 px-3 py-2 text-xs font-black text-rose-200 hover:bg-rose-500 hover:text-white transition-colors"
             >
               <DoorOpen className="h-4 w-4" />
-              <span>🚪 Sair do Veículo</span>
+              <span>Sair</span>
             </button>
           </div>
         )}
-
-        {showChatMenu && (
-          <div className="pointer-events-auto flex flex-wrap justify-center gap-1.5 rounded-2xl border border-slate-700 bg-slate-950/95 p-2.5 shadow-2xl max-w-xl">
-            {QUICK_CHAT_PHRASES.map((phrase) => {
-              const isHighlighted =
-                phrase.includes('Fá!') || phrase.includes('Obrigado, meu prefeito');
-              return (
-                <button
-                  key={phrase}
-                  type="button"
-                  onClick={() => triggerQuickChat(phrase)}
-                  className={`rounded-xl border px-3 py-1.5 text-xs font-bold transition-colors ${
-                    isHighlighted
-                      ? 'border-amber-400 bg-amber-500/20 text-amber-200 hover:bg-amber-400 hover:text-slate-950 font-black'
-                      : 'border-slate-800 bg-slate-900 text-slate-100 hover:border-sky-400 hover:bg-sky-500/20'
-                  }`}
-                >
-                  “{phrase}”
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Movement Style Selector Bar */}
-        {!drivingVehicleId && (
-          <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-1 rounded-2xl border border-slate-700/90 bg-slate-950/90 px-2 py-1 shadow-xl">
-            <span className="hidden sm:inline-flex items-center gap-1 px-1.5 text-[11px] font-bold text-sky-400">
-              <Footprints className="h-3.5 w-3.5" />
-              Estilo de Passo:
-            </span>
-            {MOVEMENT_STYLE_OPTIONS.map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => handleSelectMovementStyle(opt.id)}
-                className={`min-h-[30px] rounded-xl px-2.5 py-1 text-[11px] font-bold transition-all ${
-                  currentMoveStyle === opt.id
-                    ? 'bg-sky-500 text-slate-950 font-extrabold'
-                    : 'bg-slate-900 text-slate-300 hover:bg-slate-800 border border-slate-800'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Emotes & Quick Chat Bar (with 1-Click "Fá! 🎺💥" & "Obrigado, meu prefeito! 🫡🏛️" buttons) */}
-        <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-1.5 rounded-2xl border border-slate-700/90 bg-slate-950/90 p-1.5 shadow-xl">
-          <span className="hidden sm:inline-flex items-center gap-1 px-2 text-[11px] font-bold text-slate-400">
-            <Smile className="h-3.5 w-3.5 text-amber-400" />
-            Emotes:
-          </span>
-          {EMOTE_BUTTONS.map((btn) => (
-            <button
-              key={btn.id}
-              type="button"
-              onClick={() => triggerEmote(btn.id)}
-              className={`min-h-[34px] rounded-xl px-2.5 py-1 text-xs font-bold transition-all active:scale-95 ${
-                activeEmote === btn.id
-                  ? 'bg-amber-400 text-slate-950'
-                  : 'bg-slate-900 text-slate-200 hover:bg-slate-800 border border-slate-800'
-              }`}
-            >
-              {btn.label}
-            </button>
-          ))}
-
-          {/* Botão 1-Clique do Meme "Fá! 🎺💥" com Som Procedural */}
-          <button
-            type="button"
-            onClick={() => triggerQuickChat('Fá! 🎺💥')}
-            className="min-h-[34px] rounded-xl border border-rose-500/70 bg-gradient-to-r from-rose-600 to-amber-500 px-3 py-1 text-xs font-black text-white shadow-md hover:brightness-110 active:scale-95 transition-all"
-          >
-            🎺 Fá! 💥
-          </button>
-
-          {/* Botão 1-Clique "Obrigado, meu prefeito! 🫡🏛️" */}
-          <button
-            type="button"
-            onClick={() => triggerQuickChat('Obrigado, meu prefeito! 🫡🏛️')}
-            className="min-h-[34px] rounded-xl border border-amber-400/60 bg-amber-500/20 px-2.5 py-1 text-xs font-extrabold text-amber-200 hover:bg-amber-400 hover:text-slate-950 active:scale-95 transition-all"
-          >
-            🫡 Meu Prefeito!
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowChatMenu((v) => !v)}
-            className={`flex min-h-[34px] items-center gap-1.5 rounded-xl px-3 py-1 text-xs font-extrabold transition-all ${
-              showChatMenu || activeChatMsg
-                ? 'bg-sky-500 text-slate-950'
-                : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30'
-            }`}
-          >
-            <MessageSquare className="h-3.5 w-3.5" />
-            <span>Frases Rápidas ({QUICK_CHAT_PHRASES.length})</span>
-          </button>
-        </div>
       </div>
 
-      {/* Mobile Touch Controls (Joystick + Jump + Rotate Cam) */}
+      {/* Audio & Graphics Settings Modal */}
+      <AudioSettingsModal isOpen={audioModalOpen} onClose={() => setAudioModalOpen(false)} />
+
+      {/* Mobile Touch Controls (Joystick + Isolated Elevated Jump Button) */}
       <MobileControls
         inputRef={mobileInputRef}
         onRotateCameraStep={() => setRotateCameraSignal((c) => c + 1)}

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Delete, KeyRound, LockOpen, Trophy, UserCheck } from 'lucide-react';
 import { GradeLevel, StudentProfile } from '../types/game';
-import { getWorldById } from '../data/worlds';
+import { getWorldById, ORDERED_GRADES } from '../data/worlds';
 
 interface StudentSelectorProps {
   students: StudentProfile[];
@@ -9,15 +9,7 @@ interface StudentSelectorProps {
   onSelectStudent: (student: StudentProfile) => void;
 }
 
-const GRADE_FILTERS: ('Todos' | GradeLevel)[] = [
-  'Todos',
-  '5º Ano',
-  '6º Ano',
-  '7º Ano',
-  '8º Ano',
-  '9º Ano',
-  'Trilha Base',
-];
+const GRADE_FILTERS: ('Todos' | GradeLevel)[] = ['Todos', ...ORDERED_GRADES];
 
 export function StudentSelector({
   students,

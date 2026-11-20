@@ -1,4 +1,8 @@
 export type GradeLevel =
+  | '1º Ano'
+  | '2º Ano'
+  | '3º Ano'
+  | '4º Ano'
   | '5º Ano'
   | '6º Ano'
   | '7º Ano'
@@ -52,7 +56,38 @@ export type JerseyId =
 
 export type TowerDifficulty = 'bronze' | 'silver' | 'gold';
 
-export type GameModeType = 'obby' | 'survival' | 'turbo_race' | 'vehicle_rally';
+export type GameModeType =
+  | 'obby'
+  | 'survival'
+  | 'turbo_race'
+  | 'vehicle_rally'
+  | 'penalty'
+  | 'caete_boat';
+
+export type MultiplayerGameType = 'kart' | 'duel';
+
+export interface MultiplayerPlayerInfo {
+  id: string;
+  name: string;
+  grade: GradeLevel;
+  worldId: number;
+  school: string;
+  avatarColor: string;
+  equippedHat: string | null;
+  equippedJersey: string | null;
+  equippedTitle?: string | null;
+  ready: boolean;
+  joinedAt: number;
+}
+
+export interface MultiplayerSessionConfig {
+  mode: MultiplayerGameType;
+  roomCode: string; // 'PUBLIC' or 4-digit code
+  channelName: string;
+  isPublic: boolean;
+  players: MultiplayerPlayerInfo[];
+  seed: number;
+}
 
 export type AvatarEmote = 'wave' | 'goal' | 'dance' | 'trophy' | 'salute' | null;
 
@@ -81,6 +116,7 @@ export interface StudentProfile {
   school: string;
   pin: string; // PIN padrão inicial: "1234"
   xp: number;
+  weeklyXp?: number;
   coins: number;
   questionsAnswered: number;
   questionsCorrect: number;
@@ -88,9 +124,14 @@ export interface StudentProfile {
   unlockedItems: string[];
   equippedHat: string | null;
   equippedJersey?: string | null;
+  equippedBack?: string | null;
+  equippedAura?: string | null;
   avatarColor: string;
   movementStyle?: MovementStyle;
   auraPower?: number;
+  equippedTitle?: string | null;
+  unlockedTitles?: string[];
+  updatedAt?: string;
 }
 
 export interface WorldConfig {
@@ -228,9 +269,14 @@ export interface OnlinePlayerPresence {
   avatarColor: string;
   equippedHat: string | null;
   equippedJersey: string | null;
+  equippedBack?: string | null;
+  equippedAura?: string | null;
+  equippedTitle?: string | null;
   movementStyle?: MovementStyle;
   auraPower?: number;
   isFarmingAura?: boolean;
+  isDriving?: boolean;
+  vehicleType?: string | null;
   drivingVehicleId?: string | null;
   x: number;
   y: number;

@@ -1,24 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   ArrowLeft,
   Coins,
-  Compass,
   Gauge,
   Medal,
+  Menu,
   RotateCcw,
+  Sliders,
   Timer,
+  X,
   Zap,
 } from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
-import { AudioSettingsButton } from '../components/AudioSettingsModal';
+import { AudioSettingsModal } from '../components/AudioSettingsModal';
 import { MobileControls, MobileInputState } from '../components/MobileControls';
-import { getQuestionsForMode } from '../data/questionEngine';
+import { getQuestionsForMode, recordAnsweredQuestion } from '../data/questionEngine';
 import { getDifficultyConfig, getWorldById } from '../data/worlds';
 import { animateAvatarRig, AvatarRig, createAvatarRig } from '../game/avatarBuilder';
-import { createAnswerPadTexture, createStudTexture } from '../game/textures';
+import { createAnswerPadTexture } from '../game/textures';
+import { logQuestionAttempt } from '../services/researchTelemetry';
 import { MathQuestion, StudentProfile, TowerDifficulty } from '../types/game';
+import {
+  createPbrRenderer,
+  disposeSceneResources,
+  getGraphicsQuality,
+  GraphicsQuality,
+  isSoftwareGl,
+  ParticlePool,
+  setupTropicalEnvironment,
+  subscribeGraphicsQuality,
+} from './graphicsEngine';
+import { createTiledPbrTextures } from './textureFactory';
 
 interface TurboRaceGameProps {
   student: StudentProfile;
@@ -35,17 +48,6 @@ interface TurboRaceGameProps {
   }) => void;
   onExit: () => void;
 }
-
-const isSoftwareGl = (() => {
-  if (typeof document === 'undefined') return false;
-  const gl = document.createElement('canvas').getContext('webgl2');
-  if (!gl) return true;
-  const ext = gl.getExtension('WEBGL_debug_renderer_info');
-  const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
-  const gpu = String(gl.getParameter(param));
-  gl.getExtension('WEBGL_lose_context')?.loseContext();
-  return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
-})();
 
 const TOTAL_GATES = 8;
 const GATE_DISTANCE = 110; // 110 unidades 3D entre portões (pista total de 950 unidades)
@@ -83,12 +85,19 @@ export function TurboRaceGame({
   const mountRef = useRef<HTMLDivElement>(null);
   const [runKey, setRunKey] = useState(1);
   const [rotateCameraSignal, setRotateCameraSignal] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [audioOpen, setAudioOpen] = useState(false);
+  const [graphicsQuality, setGraphicsQualityState] = useState<GraphicsQuality>(() =>
+    getGraphicsQuality()
+  );
+
+  useEffect(() => subscribeGraphicsQuality(setGraphicsQualityState), []);
 
   const world = useMemo(() => getWorldById(worldId), [worldId]);
   const diffConfig = useMemo(() => getDifficultyConfig(difficulty), [difficulty]);
   const questions = useMemo(
-    () => getQuestionsForMode(worldId, 'turbo_race', TOTAL_GATES),
-    [worldId, runKey]
+    () => getQuestionsForMode(worldId, 'turbo_race', TOTAL_GATES, student.id),
+    [worldId, runKey, student.id]
   );
 
   const [hudState, setHudState] = useState<{
@@ -151,42 +160,26 @@ export function TurboRaceGame({
     const width = container.clientWidth || window.innerWidth;
     const height = container.clientHeight || window.innerHeight;
 
-    // 1.1. Céu Diurno Azul-Celeste (#38BDF8) + Neblina Distante Clara (#BAE6FD)
+    // 1.1. Sky Dome Tropical + FogExp2 + PBR Renderer
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x38bdf8);
-    scene.fog = new THREE.Fog(0xbae6fd, 75, 255);
 
     const camera = new THREE.PerspectiveCamera(64, width / height, 0.2, 280);
-    const renderer = new THREE.WebGLRenderer({
-      antialias: !isSoftwareGl,
-      powerPreference: 'high-performance',
+    const { renderer, maxAnisotropy: maxAniso } = createPbrRenderer(container, graphicsQuality);
+    const envRig = setupTropicalEnvironment(scene, renderer, {
+      fogColor: 0xd8f1fe,
+      fogDensity: 0.0038,
+      skyRadius: 270,
+      shadowFrustum: 34,
+      sunOffset: [22, 42, 24],
+      hemiIntensity: 0.9,
+      sunIntensity: 1.55,
+      quality: graphicsQuality,
     });
-    renderer.setSize(width, height);
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.12;
-    renderer.shadowMap.enabled = !isSoftwareGl;
-    container.appendChild(renderer.domElement);
-
-    const maxAniso = renderer.capabilities.getMaxAnisotropy();
-
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    pmrem.dispose();
-
-    const hemiLight = new THREE.HemisphereLight(0xe0f2fe, 0x0f766e, 0.95);
-    scene.add(hemiLight);
-
-    const keyLight = new THREE.DirectionalLight(0xfffbeb, 1.6);
-    keyLight.position.set(22, 42, 24);
-    keyLight.castShadow = !isSoftwareGl;
-    scene.add(keyLight);
 
     // Sol Brilhante sobre a Orla do Rio Caeté
     const sunDisc = new THREE.Mesh(
       new THREE.SphereGeometry(6.5, 18, 18),
-      new THREE.MeshBasicMaterial({ color: 0xfef08a })
+      new THREE.MeshBasicMaterial({ color: 0xfef08a, fog: false })
     );
     sunDisc.position.set(-48, 56, -150);
     scene.add(sunDisc);
@@ -214,13 +207,15 @@ export function TurboRaceGame({
     // PISTA E CALÇADÃO DA ORLA DO RIO CAETÉ (BRAGANÇA-PA)
     // =========================================================================
     const trackWidth = 14.8;
-    const trackTex = createStudTexture('#334155', maxAniso, 6, 180);
+    const trackAsphaltPbr = createTiledPbrTextures('asphalt', 4, 150, maxAniso);
     const trackMesh = new THREE.Mesh(
       new THREE.BoxGeometry(trackWidth, 1.0, TOTAL_TRACK_LENGTH),
       new THREE.MeshStandardMaterial({
-        map: trackTex,
-        roughness: 0.42,
-        metalness: 0.15,
+        map: trackAsphaltPbr.map,
+        bumpMap: trackAsphaltPbr.bumpMap,
+        bumpScale: trackAsphaltPbr.bumpScale,
+        roughness: trackAsphaltPbr.roughness,
+        metalness: 0.08,
       })
     );
     trackMesh.position.set(0, -0.5, -TOTAL_TRACK_LENGTH / 2 + 20);
@@ -258,12 +253,15 @@ export function TurboRaceGame({
     // =========================================================================
     // LADO ESQUERDO DA PISTA: RIO CAETÉ + BARCOS REGIONAIS + ILHAS RIBEIRINHAS
     // =========================================================================
+    const riverWaterPbr = createTiledPbrTextures('water', 16, 48, maxAniso);
     const riverMat = new THREE.MeshStandardMaterial({
-      color: 0x0284c7,
+      map: riverWaterPbr.map,
+      bumpMap: riverWaterPbr.bumpMap,
+      bumpScale: riverWaterPbr.bumpScale,
       emissive: 0x0d9488,
-      emissiveIntensity: 0.28,
-      roughness: 0.18,
-      metalness: 0.35,
+      emissiveIntensity: 0.22,
+      roughness: riverWaterPbr.roughness,
+      metalness: 0.28,
     });
     const riverPlane = new THREE.Mesh(
       new THREE.PlaneGeometry(240, TOTAL_TRACK_LENGTH + 300),
@@ -643,14 +641,9 @@ export function TurboRaceGame({
     );
     scene.add(avatarRig.root);
 
-    // Trail Particles for Mega Turbo
-    const trailParticles: { mesh: THREE.Mesh; life: number }[] = [];
-    const trailGeo = new THREE.BoxGeometry(0.24, 0.24, 0.55);
-    const trailMat = new THREE.MeshStandardMaterial({
-      color: 0x22d3ee,
-      emissive: 0x06b6d4,
-      emissiveIntensity: 1.2,
-    });
+    // Zero-GC InstancedMesh Particle Pool for Mega Turbo trail & gate bursts
+    const trailPool = new ParticlePool(120, graphicsQuality);
+    scene.add(trailPool.mesh);
 
     // Race Physics State + Pre-Race 3..2..1..JÁ! Countdown
     const pos = { x: 0, y: 0, z: 4 };
@@ -671,6 +664,7 @@ export function TurboRaceGame({
     let feedbackToast: { text: string; isCorrect: boolean } | null = null;
 
     let currentGateIndex = 0;
+    let gateShownAtMs = performance.now();
     let elapsedRace = 0;
     let sessionXp = 0;
     let sessionCoins = 0;
@@ -755,6 +749,10 @@ export function TurboRaceGame({
         cl.group.position.x += cl.speed * delta;
         if (cl.group.position.x > 95) cl.group.position.x = -95;
       }
+
+      riverWaterPbr.map.offset.y = (elapsed * 0.04) % 1;
+      riverWaterPbr.map.offset.x = (elapsed * 0.015) % 1;
+      riverWaterPbr.bumpMap.offset.copy(riverWaterPbr.map.offset);
 
       for (const ws of waveStripes) {
         ws.mesh.position.x = ws.baseX + Math.sin(elapsed * 2.2 + ws.phase) * 1.8;
@@ -858,11 +856,26 @@ export function TurboRaceGame({
             gateTriggered[g] = true;
             currentGateIndex = Math.min(TOTAL_GATES - 1, g + 1);
             const q = questions[g];
+            if (q) recordAnsweredQuestion(student.id, q.prompt);
 
             const chosenLane = pos.x < -2.25 ? 0 : pos.x > 2.25 ? 2 : 1;
             const chosenLetter = letters[chosenLane];
+            const isCorrect = Boolean(q) && chosenLane === q.correctIndex;
+            if (q) {
+              logQuestionAttempt({
+                studentId: student.id,
+                school: student.school,
+                grade: student.grade,
+                worldId,
+                gameMode: 'turbo_race',
+                bnccTopic: q.topic,
+                isCorrect,
+                responseTimeMs: Math.max(200, Math.round(performance.now() - gateShownAtMs)),
+              });
+            }
+            gateShownAtMs = performance.now();
 
-            if (chosenLane === q.correctIndex) {
+            if (isCorrect) {
               turboTimer = 4.0;
               slowTimer = 0;
               correctCount += 1;
@@ -930,12 +943,20 @@ export function TurboRaceGame({
 
         if (turboTimer > 0) {
           trailSpawnAccum += delta;
-          if (trailSpawnAccum > 0.04) {
+          if (trailSpawnAccum > 0.035) {
             trailSpawnAccum = 0;
-            const p = new THREE.Mesh(trailGeo, trailMat);
-            p.position.set(pos.x + (Math.random() - 0.5) * 0.5, pos.y + 0.35, pos.z + 0.6);
-            scene.add(p);
-            trailParticles.push({ mesh: p, life: 0.45 });
+            trailPool.emit(
+              pos.x + (Math.random() - 0.5) * 0.5,
+              pos.y + 0.35,
+              pos.z + 0.6,
+              (Math.random() - 0.5) * 1.2,
+              0.8 + Math.random() * 0.8,
+              4.0,
+              0x22d3ee,
+              0.28,
+              0.42,
+              2.0
+            );
           }
         }
 
@@ -975,15 +996,7 @@ export function TurboRaceGame({
         );
       }
 
-      for (let i = trailParticles.length - 1; i >= 0; i--) {
-        trailParticles[i].life -= delta;
-        if (trailParticles[i].life <= 0) {
-          scene.remove(trailParticles[i].mesh);
-          trailParticles.splice(i, 1);
-        } else {
-          trailParticles[i].mesh.scale.setScalar(trailParticles[i].life * 2);
-        }
-      }
+      trailPool.update(delta);
 
       const targetFov = turboTimer > 0 ? 76 : 62;
       if (Math.abs(camera.fov - targetFov) > 0.2) {
@@ -993,6 +1006,7 @@ export function TurboRaceGame({
 
       camera.position.set(pos.x * 0.65, pos.y + 3.9, pos.z + 8.8);
       camera.lookAt(pos.x * 0.5, pos.y + 1.8, pos.z - 14);
+      envRig.updateShadowTarget(pos.x, pos.y, pos.z - 8);
 
       syncHud(false, elapsed, cdLabel);
       renderer.render(scene, camera);
@@ -1011,117 +1025,124 @@ export function TurboRaceGame({
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('resize', onResize);
-      renderer.dispose();
-      if (renderer.domElement.parentNode === container) {
-        container.removeChild(renderer.domElement);
-      }
+      disposeSceneResources(scene, renderer, envRig.envTexture);
     };
-  }, [runKey, worldId, difficulty, student.avatarColor, student.equippedHat, student.equippedJersey]);
+  }, [
+    runKey,
+    worldId,
+    difficulty,
+    student.id,
+    student.avatarColor,
+    student.equippedHat,
+    student.equippedJersey,
+    graphicsQuality,
+  ]);
 
   const q = hudState.question;
 
   return (
-    <div className="relative h-[100dvh] w-screen overflow-hidden bg-slate-950 select-none">
+    <div className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-slate-950 select-none">
       <div ref={mountRef} className="touch-none-select h-full w-full" />
 
-      {/* Top HUD */}
-      <div className="pointer-events-none fixed inset-x-0 top-0 z-20 flex flex-col gap-2 p-3 sm:p-4">
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-2">
-          <div className="pointer-events-auto flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onExit}
-              className="flex min-h-[42px] items-center gap-1.5 rounded-xl border border-white/15 bg-slate-900/90 px-3 py-2 text-xs font-bold text-slate-200 hover:bg-slate-800"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              <span>Praça / Menu</span>
-            </button>
-            <AudioSettingsButton />
-          </div>
-
-          <div className="flex items-center gap-3 rounded-2xl border border-sky-500/40 bg-slate-900/95 px-4 py-2">
-            <span className="hidden md:inline-flex items-center gap-1 text-xs font-extrabold text-teal-300">
-              <Compass className="h-3.5 w-3.5" /> Orla do Rio Caeté
-            </span>
-            <span className="hidden md:inline text-slate-600">|</span>
-            <span className="font-display text-xs sm:text-sm font-extrabold text-white">
+      {/* Ultra-Thin Translucent Top HUD (<= 15% mobile height) */}
+      <div className="pointer-events-none fixed inset-x-0 top-0 z-20 flex flex-col gap-1.5 px-2.5 pt-2 sm:px-4 sm:pt-3">
+        <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-900/60 px-2.5 py-1.5 backdrop-blur-sm shadow-lg">
+          {/* Left: Gate Progress */}
+          <div className="flex items-center gap-2 text-xs sm:text-sm font-extrabold text-white whitespace-nowrap tabular-nums">
+            <span className="font-display">
               Portão {hudState.gateIndex + 1}/{TOTAL_GATES}
             </span>
-            <span className="text-slate-600">|</span>
-            <span className="font-mono text-xs font-bold text-cyan-300 tabular-nums">
-              {hudState.distanceToNextGate}m
+            <span className="hidden md:inline text-slate-400 font-normal">·</span>
+            <span className="hidden md:inline text-xs font-semibold text-sky-300">
+              {world.grade}
             </span>
-            <span className="text-slate-600">|</span>
-            <Timer className="h-4 w-4 text-sky-400" />
-            <span className="font-mono text-sm sm:text-base font-black text-amber-300 tabular-nums">
+          </div>
+
+          {/* Center: Timer & Turbo State */}
+          <div className="flex items-center gap-2 text-xs font-mono font-bold tabular-nums">
+            <span className="flex items-center gap-1 text-amber-300">
+              <Timer className="h-3.5 w-3.5 text-sky-400" />
               {hudState.elapsedRace.toFixed(1)}s
             </span>
+            <span className="hidden sm:inline text-cyan-300">{hudState.distanceToNextGate}m</span>
             {hudState.speedState === 'turbo' && (
-              <span className="flex items-center gap-1 rounded-lg bg-cyan-500/20 px-2 py-0.5 text-[11px] font-black text-cyan-300 border border-cyan-400/40">
-                <Zap className="h-3 w-3" /> 2.2x TURBO
+              <span className="flex items-center gap-0.5 text-cyan-300 font-black">
+                <Zap className="h-3.5 w-3.5" /> 2.2x
               </span>
             )}
             {hudState.speedState === 'slow' && (
-              <span className="flex items-center gap-1 rounded-lg bg-rose-500/20 px-2 py-0.5 text-[11px] font-black text-rose-300 border border-rose-400/40">
-                <Gauge className="h-3 w-3" /> 0.5x LENTO
+              <span className="flex items-center gap-0.5 text-rose-300 font-black">
+                <Gauge className="h-3.5 w-3.5" /> 0.5x
               </span>
             )}
-          </div>
-
-          <div className="flex items-center gap-2 rounded-xl border border-white/15 bg-slate-900/90 px-3 py-2 font-mono text-xs font-bold tabular-nums">
-            <span className="text-emerald-400">+{hudState.sessionXp} XP</span>
-            <span className="text-amber-400 flex items-center gap-1">
+            <span className="hidden md:flex items-center gap-1 text-amber-300">
               <Coins className="h-3.5 w-3.5" />+{hudState.sessionCoins}
             </span>
           </div>
+
+          {/* Right: Single Hamburger Menu Button */}
+          <div className="pointer-events-auto relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setMenuOpen((v) => !v)}
+              className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg border border-white/15 bg-slate-950/65 text-white hover:bg-slate-800 active:scale-95 transition-transform"
+              aria-label="Abrir menu"
+            >
+              {menuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+            </button>
+
+            {menuOpen && (
+              <div className="absolute right-0 top-10 z-50 flex w-48 flex-col gap-1 rounded-2xl border border-white/15 bg-slate-950/95 p-2 shadow-2xl backdrop-blur-md">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setAudioOpen(true);
+                  }}
+                  className="flex min-h-[40px] items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-slate-100 hover:bg-slate-800"
+                >
+                  <Sliders className="h-4 w-4 text-sky-400" />
+                  <span>Som &amp; Gráficos</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onExit();
+                  }}
+                  className="flex min-h-[40px] items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-rose-300 hover:bg-rose-500/15"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  <span>Sair para a Praça</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Immediate Next Portal Question Card (Tabuada & Raciocínio Rápido) */}
+        {/* Compact Semi-Transparent Question Card */}
         {q && !hudState.finished && (
-          <div className="mx-auto w-full max-w-3xl rounded-2xl border border-sky-500/40 bg-slate-950/95 p-3.5 sm:p-4 shadow-2xl">
-            <div className="flex items-center justify-between text-[11px] font-bold text-sky-400">
-              <span>
-                ORLA DO RIO CAETÉ (BRAGANÇA-PA) · PORTÃO {hudState.gateIndex + 1}/{TOTAL_GATES} ({world.grade} · {q.topic})
-              </span>
-              <span className="font-mono text-amber-300">
-                Próximo portão em {hudState.distanceToNextGate}m
-              </span>
-            </div>
-            <p className="mt-1 font-display text-base sm:text-xl font-extrabold text-white">
+          <div className="mx-auto w-full max-w-xl rounded-xl border border-sky-400/35 bg-slate-950/70 px-3 py-1.5 backdrop-blur-sm shadow-lg text-center">
+            <p className="font-display text-sm sm:text-base font-extrabold text-white leading-tight truncate">
               {q.prompt}
             </p>
-            <div className="mt-2.5 grid grid-cols-3 gap-2">
-              {(['A', 'B', 'C'] as const).map((letter, idx) => {
-                const badgeBg =
-                  letter === 'A'
-                    ? 'bg-blue-600'
-                    : letter === 'B'
-                      ? 'bg-amber-600'
-                      : 'bg-purple-600';
-                return (
-                  <div
-                    key={letter}
-                    className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900 px-2.5 py-1.5 text-xs sm:text-sm font-bold text-slate-100"
-                  >
-                    <span
-                      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md font-display text-xs font-black text-white ${badgeBg}`}
-                    >
-                      {letter}
-                    </span>
-                    <span className="truncate">{q.options[idx]}</span>
-                  </div>
-                );
-              })}
+            <div className="mt-1 grid grid-cols-3 gap-1.5 text-[11px] sm:text-xs font-mono font-extrabold">
+              <div className="rounded-lg bg-blue-600/85 px-1.5 py-0.5 text-white truncate">
+                A: {q.options[0]}
+              </div>
+              <div className="rounded-lg bg-amber-500/90 px-1.5 py-0.5 text-slate-950 truncate">
+                B: {q.options[1]}
+              </div>
+              <div className="rounded-lg bg-purple-600/85 px-1.5 py-0.5 text-white truncate">
+                C: {q.options[2]}
+              </div>
             </div>
           </div>
         )}
 
         {/* Pre-Race Countdown Banner (3... 2... 1... JÁ!) */}
         {hudState.countdownLabel && !hudState.finished && (
-          <div className="mx-auto mt-2 rounded-2xl border-2 border-amber-400 bg-slate-950/95 px-8 py-3 text-center shadow-2xl">
-            <p className="text-[11px] font-bold uppercase tracking-widest text-sky-400">
-              Largada na Orla do Rio Caeté
-            </p>
+          <div className="mx-auto mt-2 rounded-2xl border-2 border-amber-400 bg-slate-950/85 px-7 py-2.5 text-center shadow-2xl">
             <p className="font-display text-4xl sm:text-5xl font-black text-amber-300">
               {hudState.countdownLabel}
             </p>
@@ -1131,10 +1152,10 @@ export function TurboRaceGame({
         {/* Feedback Toast */}
         {hudState.feedbackToast && (
           <div
-            className={`mx-auto rounded-xl border px-4 py-2 text-xs font-extrabold shadow-lg ${
+            className={`mx-auto rounded-lg border px-3 py-1 text-xs font-extrabold shadow-lg ${
               hudState.feedbackToast.isCorrect
-                ? 'border-emerald-400 bg-emerald-950/95 text-emerald-200'
-                : 'border-rose-400 bg-rose-950/95 text-rose-200'
+                ? 'border-emerald-400 bg-emerald-950/90 text-emerald-200'
+                : 'border-rose-400 bg-rose-950/90 text-rose-200'
             }`}
           >
             {hudState.feedbackToast.text}
@@ -1142,9 +1163,11 @@ export function TurboRaceGame({
         )}
       </div>
 
+      <AudioSettingsModal isOpen={audioOpen} onClose={() => setAudioOpen(false)} />
+
       {/* Finish Line Medal Modal */}
       {hudState.finished && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/85 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4">
           <div className="w-full max-w-md rounded-3xl border border-sky-400/50 bg-slate-900 p-6 text-center shadow-2xl">
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-400/20 text-amber-300">
               <Medal className="h-9 w-9" />
@@ -1199,6 +1222,7 @@ export function TurboRaceGame({
         <MobileControls
           inputRef={mobileInputRef}
           onRotateCameraStep={() => setRotateCameraSignal((n) => n + 1)}
+          hideCameraButton
         />
       )}
     </div>

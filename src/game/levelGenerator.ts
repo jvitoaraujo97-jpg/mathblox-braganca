@@ -4,11 +4,12 @@ import { CoinDef, LevelData, PlatformDef, SignDef, TowerDifficulty } from '../ty
 
 export function generateWorldLevel(
   worldId: number,
-  difficultyId: TowerDifficulty = 'gold'
+  difficultyId: TowerDifficulty = 'gold',
+  studentId?: string
 ): LevelData {
   const world = getWorldById(worldId);
   const difficulty = getDifficultyConfig(difficultyId);
-  const questions = getQuestionsForMode(worldId, 'obby', difficulty.stagesCount);
+  const questions = getQuestionsForMode(worldId, 'obby', difficulty.stagesCount, studentId);
 
   const platforms: PlatformDef[] = [];
   const coins: CoinDef[] = [];

@@ -1,7 +1,19 @@
-import { ArrowLeft, ChevronDown, ChevronUp, Coins, Flame, RotateCcw, Trophy, Zap } from 'lucide-react';
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronUp,
+  Coins,
+  Flame,
+  Menu,
+  RotateCcw,
+  Sliders,
+  Trophy,
+  X,
+  Zap,
+} from 'lucide-react';
 import { useState } from 'react';
 import { GameHUDState, StudentProfile, TrapFeedback, WorldConfig } from '../types/game';
-import { AudioSettingsButton } from './AudioSettingsModal';
+import { AudioSettingsModal } from './AudioSettingsModal';
 
 interface GameHUDProps {
   student: StudentProfile;
@@ -25,6 +37,8 @@ export function GameHUD({
   onReplayWorld,
 }: GameHUDProps) {
   const [questionCollapsed, setQuestionCollapsed] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [audioOpen, setAudioOpen] = useState(false);
 
   const stageDisplay = Math.min(hud.currentStage + 1, hud.totalStages);
   const accuracy =
@@ -34,105 +48,131 @@ export function GameHUD({
 
   return (
     <>
-      {/* Top Compact HUD Bar (no backdrop-blur over WebGL!) */}
-      <div className="pointer-events-none fixed inset-x-0 top-0 z-20 p-2.5 sm:p-4">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-2 rounded-2xl border border-white/15 bg-slate-950/90 px-3 py-2 shadow-xl">
-          {/* Left: Exit + World Stage */}
-          <div className="pointer-events-auto flex items-center gap-2.5 min-w-0">
-            <button
-              type="button"
-              onClick={onExitGame}
-              className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl border border-slate-700 bg-slate-900 px-2.5 text-xs font-semibold text-white hover:bg-slate-800 active:scale-95 transition-transform whitespace-nowrap shrink-0"
-              aria-label="Voltar ao Lobby"
-            >
-              <ArrowLeft className="h-4 w-4 sm:mr-1.5" />
-              <span className="hidden sm:inline">Lobby</span>
-            </button>
-
-            <div className="min-w-0">
-              <p className="truncate font-display text-xs sm:text-sm font-bold text-white">
-                {world.grade} · Estágio {stageDisplay}/{hud.totalStages}
-              </p>
-              <p className="truncate text-[11px] text-slate-400">{student.name}</p>
-            </div>
+      {/* Ultra-Thin Translucent Top HUD Bar (<= 15% mobile height) */}
+      <div className="pointer-events-none fixed inset-x-0 top-0 z-20 flex flex-col gap-1.5 px-2.5 pt-2 sm:px-4 sm:pt-3">
+        <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-2 rounded-xl border border-white/10 bg-slate-900/60 px-2.5 py-1.5 backdrop-blur-sm shadow-lg">
+          {/* Left: Stage / Grade */}
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-display text-xs sm:text-sm font-extrabold text-white whitespace-nowrap tabular-nums">
+              Fase {stageDisplay}/{hud.totalStages}
+            </span>
+            <span className="hidden md:inline text-xs text-slate-400">·</span>
+            <span className="hidden md:inline truncate text-xs font-semibold text-sky-300">
+              {world.grade} · {student.name}
+            </span>
           </div>
 
-          {/* Right: Coins, XP, Streak, Audio Settings */}
-          <div className="pointer-events-auto flex items-center gap-2 sm:gap-3 shrink-0">
+          {/* Center: Boost / Streak / Coins */}
+          <div className="flex items-center gap-2.5 text-xs font-mono font-bold tabular-nums">
             {hud.speedBoostLeft > 0 && (
-              <div className="flex items-center gap-1 rounded-lg bg-sky-500/20 px-2 py-1 text-xs font-bold text-sky-300 tabular-nums whitespace-nowrap">
-                <Zap className="h-3.5 w-3.5 text-sky-400" />
-                <span>{hud.speedBoostLeft.toFixed(1)}s</span>
+              <span className="flex items-center gap-0.5 text-sky-300">
+                <Zap className="h-3.5 w-3.5" />
+                {hud.speedBoostLeft.toFixed(1)}s
+              </span>
+            )}
+            {hud.streak > 1 && (
+              <span className="hidden sm:flex items-center gap-0.5 text-orange-400">
+                <Flame className="h-3.5 w-3.5" />
+                {hud.streak}x
+              </span>
+            )}
+            <span className="flex items-center gap-1 text-amber-300">
+              <Coins className="h-3.5 w-3.5" />
+              {student.coins}
+            </span>
+            <span className="hidden md:inline text-emerald-400">+{hud.sessionXp} XP</span>
+          </div>
+
+          {/* Right: Single Hamburger Menu Button */}
+          <div className="pointer-events-auto relative flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setMenuOpen((v) => !v)}
+              className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg border border-white/15 bg-slate-950/65 text-white hover:bg-slate-800 active:scale-95 transition-transform"
+              aria-label="Abrir menu"
+            >
+              {menuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+            </button>
+
+            {menuOpen && (
+              <div className="absolute right-0 top-10 z-50 flex w-48 flex-col gap-1 rounded-2xl border border-white/15 bg-slate-950/95 p-2 shadow-2xl backdrop-blur-md">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setAudioOpen(true);
+                  }}
+                  className="flex min-h-[40px] items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-slate-100 hover:bg-slate-800"
+                >
+                  <Sliders className="h-4 w-4 text-sky-400" />
+                  <span>Som &amp; Gráficos</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onExitGame();
+                  }}
+                  className="flex min-h-[40px] items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-bold text-rose-300 hover:bg-rose-500/15"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  <span>Sair para a Praça</span>
+                </button>
               </div>
             )}
-
-            {hud.streak > 0 && (
-              <div className="hidden xs:flex sm:flex items-center gap-1 text-xs font-bold text-orange-400 tabular-nums whitespace-nowrap">
-                <Flame className="h-4 w-4" />
-                <span>{hud.streak}x</span>
-              </div>
-            )}
-
-            <div className="flex items-center gap-1 text-xs sm:text-sm font-bold text-amber-400 font-mono tabular-nums whitespace-nowrap">
-              <Coins className="h-4 w-4" />
-              <span>{student.coins}</span>
-            </div>
-
-            <div className="hidden sm:block font-mono text-xs font-bold text-emerald-400 tabular-nums whitespace-nowrap">
-              +{hud.sessionXp} XP
-            </div>
-
-            <AudioSettingsButton compact />
           </div>
         </div>
 
-        {/* Mirrored Active Question Card for Comfortable Mobile Reading */}
+        {/* Compact Semi-Transparent Question Card */}
         {hud.activeQuestion && !hud.victory && (
-          <div className="mx-auto mt-2 max-w-2xl">
-            <div className="pointer-events-auto rounded-2xl border border-white/15 bg-slate-950/90 px-3.5 py-2.5 shadow-lg">
+          <div className="mx-auto w-full max-w-xl">
+            <div className="pointer-events-auto rounded-xl border border-white/15 bg-slate-950/70 px-3 py-1.5 backdrop-blur-sm shadow-lg">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-semibold text-sky-400 truncate">
-                  Desafio {hud.activeQuestion.stageIndex + 1} · {hud.activeQuestion.topic}
-                </span>
+                <p className="truncate font-display text-xs sm:text-sm font-extrabold text-white">
+                  {hud.activeQuestion.prompt}
+                </p>
                 <button
                   type="button"
                   onClick={() => setQuestionCollapsed((c) => !c)}
-                  className="flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-white whitespace-nowrap shrink-0"
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-slate-300 hover:text-white"
+                  aria-label={questionCollapsed ? 'Mostrar alternativas' : 'Ocultar alternativas'}
                 >
-                  <span>{questionCollapsed ? 'Ver questão' : 'Ocultar'}</span>
-                  {questionCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+                  {questionCollapsed ? (
+                    <ChevronDown className="h-4 w-4" />
+                  ) : (
+                    <ChevronUp className="h-4 w-4" />
+                  )}
                 </button>
               </div>
 
               {!questionCollapsed && (
-                <>
-                  <p className="mt-1 text-sm sm:text-base font-bold leading-snug text-white">
-                    {hud.activeQuestion.prompt}
-                  </p>
-                  <div className="mt-2 grid grid-cols-3 gap-1.5 text-center text-xs font-mono font-bold">
-                    <div className="rounded-lg bg-blue-600/90 px-1.5 py-1 text-white truncate">
-                      A: {hud.activeQuestion.options[0]}
-                    </div>
-                    <div className="rounded-lg bg-amber-500/95 px-1.5 py-1 text-slate-950 truncate">
-                      B: {hud.activeQuestion.options[1]}
-                    </div>
-                    <div className="rounded-lg bg-purple-600/90 px-1.5 py-1 text-white truncate">
-                      C: {hud.activeQuestion.options[2]}
-                    </div>
+                <div className="mt-1 grid grid-cols-3 gap-1.5 text-center text-[11px] sm:text-xs font-mono font-bold">
+                  <div className="rounded-lg bg-blue-600/85 px-1.5 py-0.5 text-white truncate">
+                    A: {hud.activeQuestion.options[0]}
                   </div>
-                </>
+                  <div className="rounded-lg bg-amber-500/90 px-1.5 py-0.5 text-slate-950 truncate">
+                    B: {hud.activeQuestion.options[1]}
+                  </div>
+                  <div className="rounded-lg bg-purple-600/85 px-1.5 py-0.5 text-white truncate">
+                    C: {hud.activeQuestion.options[2]}
+                  </div>
+                </div>
               )}
             </div>
           </div>
         )}
       </div>
 
+      {/* Audio & Graphics Settings Modal */}
+      <AudioSettingsModal isOpen={audioOpen} onClose={() => setAudioOpen(false)} />
+
       {/* Trap Feedback Modal (after falling into lava) */}
       {trapFeedback && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/85 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4">
           <div className="w-full max-w-md rounded-3xl border border-rose-500/40 bg-slate-900 p-6 shadow-2xl">
             <p className="text-xs font-semibold text-rose-400">
-              Armadilha na Ponte · Alternativa {trapFeedback.chosenLetter} ({trapFeedback.chosenAnswer})
+              Armadilha na Ponte · Alternativa {trapFeedback.chosenLetter} (
+              {trapFeedback.chosenAnswer})
             </p>
             <h3 className="mt-1.5 font-display text-xl font-extrabold text-white">
               Quase lá! Veja como resolver:
@@ -164,7 +204,7 @@ export function GameHUD({
 
       {/* Victory Modal */}
       {hud.victory && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/85 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4">
           <div className="w-full max-w-md rounded-3xl border border-amber-400/50 bg-slate-900 p-6 text-center shadow-2xl">
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-400/15 text-amber-400">
               <Trophy className="h-9 w-9" />
@@ -184,7 +224,7 @@ export function GameHUD({
               <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
                 <p className="text-[11px] text-slate-400">XP Ganho</p>
                 <p className="mt-0.5 font-mono text-lg font-bold text-emerald-400 tabular-nums">
-                  +{hud.sessionXp}
+                  +{hud.sessionXp} XP
                 </p>
               </div>
               <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
@@ -215,7 +255,7 @@ export function GameHUD({
                 onClick={onExitGame}
                 className="flex flex-1 min-h-[46px] items-center justify-center rounded-xl bg-emerald-500 px-4 py-2.5 font-display text-sm font-extrabold text-slate-950 hover:bg-emerald-400"
               >
-                Ir para Loja & Ranking
+                Ir para Loja &amp; Ranking
               </button>
             </div>
           </div>

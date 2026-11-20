@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { soundEngine } from '../audio/soundEngine';
+import { recordAnsweredQuestion } from '../data/questionEngine';
 import { animateAvatarRig, AvatarRig, createAvatarRig } from '../game/avatarBuilder';
 import {
   createAnswerPadTexture,
@@ -9,6 +9,18 @@ import {
   createQuestionSignTexture,
   createStudTexture,
 } from '../game/textures';
+import {
+  createPbrRenderer,
+  disposeSceneResources,
+  getGraphicsQuality,
+  GraphicsQuality,
+  isSoftwareGl,
+  ParticlePool,
+  setupTropicalEnvironment,
+  subscribeGraphicsQuality,
+} from '../three/graphicsEngine';
+import { createTiledPbrTextures } from '../three/textureFactory';
+import { logQuestionAttempt } from '../services/researchTelemetry';
 import { GameHUDState, LevelData, PlatformDef, StudentProfile, TrapFeedback } from '../types/game';
 import { MobileInputState } from './MobileControls';
 
@@ -36,30 +48,10 @@ interface ObbyCanvasProps {
   }) => void;
 }
 
-const isSoftwareGl = (() => {
-  if (typeof document === 'undefined') return false;
-  const gl = document.createElement('canvas').getContext('webgl2');
-  if (!gl) return true;
-  const ext = gl.getExtension('WEBGL_debug_renderer_info');
-  const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
-  const gpu = String(gl.getParameter(param));
-  gl.getExtension('WEBGL_lose_context')?.loseContext();
-  return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
-})();
-
 // Pre-allocated math helpers outside the render loop (zero GC)
 const _camTarget = new THREE.Vector3();
 const _desiredCamPos = new THREE.Vector3();
 const _moveDir = new THREE.Vector3();
-
-interface ParticleItem {
-  mesh: THREE.Mesh;
-  vx: number;
-  vy: number;
-  vz: number;
-  life: number;
-  maxLife: number;
-}
 
 export function ObbyCanvas({
   level,
@@ -74,6 +66,11 @@ export function ObbyCanvas({
 }: ObbyCanvasProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [contextLost, setContextLost] = useState(false);
+  const [graphicsQuality, setGraphicsQualityState] = useState<GraphicsQuality>(() =>
+    getGraphicsQuality()
+  );
+
+  useEffect(() => subscribeGraphicsQuality(setGraphicsQualityState), []);
 
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
@@ -114,22 +111,19 @@ export function ObbyCanvas({
     const height = container.clientHeight || window.innerHeight;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(level.world.skyColor);
-    scene.fog = new THREE.Fog(level.world.fogColor, 48, 175);
 
-    const camera = new THREE.PerspectiveCamera(62, width / height, 0.2, 260);
-    const renderer = new THREE.WebGLRenderer({
-      antialias: !isSoftwareGl,
-      powerPreference: 'high-performance',
+    const camera = new THREE.PerspectiveCamera(62, width / height, 0.2, 270);
+    const { renderer, maxAnisotropy: maxAniso } = createPbrRenderer(container, graphicsQuality);
+    const envRig = setupTropicalEnvironment(scene, renderer, {
+      fogColor: level.world.fogColor,
+      fogDensity: 0.0042,
+      skyRadius: 260,
+      shadowFrustum: 32,
+      sunOffset: [18, 36, 22],
+      hemiIntensity: 0.78,
+      sunIntensity: 1.5,
+      quality: graphicsQuality,
     });
-    renderer.setSize(width, height);
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.08;
-    renderer.shadowMap.enabled = !isSoftwareGl;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    container.appendChild(renderer.domElement);
 
     const handleContextLost = (e: Event) => {
       e.preventDefault();
@@ -141,40 +135,16 @@ export function ObbyCanvas({
     renderer.domElement.addEventListener('webglcontextlost', handleContextLost);
     renderer.domElement.addEventListener('webglcontextrestored', handleContextRestored);
 
-    const maxAniso = renderer.capabilities.getMaxAnisotropy();
-
-    // Studio Environment Reflections
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    pmrem.dispose();
-
-    // Warm/Cool Lighting Rig
-    const hemiLight = new THREE.HemisphereLight(0xe0f2fe, 0x334155, 0.78);
-    scene.add(hemiLight);
-
-    const keyLight = new THREE.DirectionalLight(0xfff7ed, 1.55);
-    keyLight.position.set(18, 36, 22);
-    keyLight.castShadow = !isSoftwareGl;
-    keyLight.shadow.mapSize.set(1024, 1024);
-    keyLight.shadow.camera.near = 2;
-    keyLight.shadow.camera.far = 110;
-    const d = 32;
-    keyLight.shadow.camera.left = -d;
-    keyLight.shadow.camera.right = d;
-    keyLight.shadow.camera.top = d;
-    keyLight.shadow.camera.bottom = -d;
-    keyLight.shadow.bias = -0.0005;
-    keyLight.shadow.normalBias = 0.02;
-    scene.add(keyLight);
-    scene.add(keyLight.target);
-
-    // 1.4. Mirante do Caeté e Ilhas Costeiras: Mar/Rio Animado ao Fundo + Canal de Lava Central
+    // 1.4. Mirante do Caeté e Ilhas Costeiras: Mar/Rio PBR Animado ao Fundo + Canal de Lava Central
+    const coastalWaterPbr = createTiledPbrTextures('water', 22, 32, maxAniso);
     const coastalSeaMat = new THREE.MeshStandardMaterial({
-      color: 0x0284c7,
+      map: coastalWaterPbr.map,
+      bumpMap: coastalWaterPbr.bumpMap,
+      bumpScale: coastalWaterPbr.bumpScale,
       emissive: 0x0d9488,
-      emissiveIntensity: 0.28,
-      roughness: 0.2,
-      metalness: 0.35,
+      emissiveIntensity: 0.22,
+      roughness: coastalWaterPbr.roughness,
+      metalness: 0.28,
     });
     const coastalSea = new THREE.Mesh(new THREE.PlaneGeometry(640, 880), coastalSeaMat);
     coastalSea.rotation.x = -Math.PI / 2;
@@ -494,29 +464,11 @@ export function ObbyCanvas({
     );
     scene.add(avatarRig.root);
 
-    // Particle Pool
-    const particles: ParticleItem[] = [];
-    const particleGeo = new THREE.BoxGeometry(0.18, 0.18, 0.18);
+    // Zero-GC InstancedMesh Particle Pool (60 FPS mobile optimization)
+    const particlePool = new ParticlePool(140, graphicsQuality);
+    scene.add(particlePool.mesh);
     const spawnBurst = (x: number, y: number, z: number, colorHex: number, count: number) => {
-      const mat = new THREE.MeshStandardMaterial({
-        color: colorHex,
-        emissive: colorHex,
-        emissiveIntensity: 0.6,
-        roughness: 0.3,
-      });
-      for (let i = 0; i < count; i++) {
-        const mesh = new THREE.Mesh(particleGeo, mat);
-        mesh.position.set(x, y, z);
-        scene.add(mesh);
-        particles.push({
-          mesh,
-          vx: (Math.random() - 0.5) * 7,
-          vy: 2 + Math.random() * 6,
-          vz: (Math.random() - 0.5) * 7,
-          life: 0,
-          maxLife: 0.45 + Math.random() * 0.35,
-        });
-      }
+      particlePool.emitBurst(x, y, z, count, colorHex, 5.5, 0.22, 0.55);
     };
 
     // Physics State
@@ -547,6 +499,7 @@ export function ObbyCanvas({
 
     // Gameplay Session State
     let currentStage = 0;
+    let stageEnteredAtMs = performance.now();
     let streak = 0;
     let bestStreakSession = 0;
     let speedBoostTimer = 0;
@@ -690,10 +643,13 @@ export function ObbyCanvas({
       const delta = Math.min(clock.getDelta(), 0.045);
       const elapsed = clock.getElapsedTime();
 
-      // Animate lava & clouds regardless of pause
+      // Animate lava, coastal PBR water & clouds regardless of pause
       lavaTex.offset.x = (elapsed * 0.03) % 1;
       lavaTex.offset.y = (elapsed * 0.02) % 1;
       lavaMat.emissiveIntensity = 0.85 + Math.sin(elapsed * 2.2) * 0.18;
+      coastalWaterPbr.map.offset.x = (elapsed * 0.02) % 1;
+      coastalWaterPbr.map.offset.y = (elapsed * 0.03) % 1;
+      coastalWaterPbr.bumpMap.offset.copy(coastalWaterPbr.map.offset);
 
       for (const c of cloudClusters) {
         c.group.position.x += c.speed * delta * 0.6;
@@ -906,6 +862,7 @@ export function ObbyCanvas({
                   stageIndex: stood.stageIndex,
                 };
                 if (isNewStageCp) {
+                  stageEnteredAtMs = performance.now();
                   soundEngine.playCheckpoint();
                   spawnBurst(pos.x, pos.y + 0.8, pos.z, 0x22c55e, 10);
                 }
@@ -925,6 +882,20 @@ export function ObbyCanvas({
             // Answer Bridge Choice!
             if (stood.kind === 'answer' && !stood.triggered) {
               const q = level.questions[stood.stageIndex];
+              if (q) {
+                recordAnsweredQuestion(student.id, q.prompt);
+                logQuestionAttempt({
+                  studentId: student.id,
+                  school: student.school,
+                  grade: student.grade,
+                  worldId: level.world.id,
+                  gameMode: 'obby',
+                  bnccTopic: q.topic,
+                  isCorrect: !stood.isTrap,
+                  responseTimeMs: Math.max(200, Math.round(performance.now() - stageEnteredAtMs)),
+                });
+                stageEnteredAtMs = performance.now();
+              }
               if (stood.isTrap) {
                 // TRAP! Platform turns red & loses collision
                 stood.triggered = true;
@@ -1123,27 +1094,11 @@ export function ObbyCanvas({
         );
       }
 
-      // Update Particles
-      for (let i = particles.length - 1; i >= 0; i--) {
-        const pt = particles[i];
-        pt.life += delta;
-        if (pt.life >= pt.maxLife) {
-          scene.remove(pt.mesh);
-          particles.splice(i, 1);
-          continue;
-        }
-        pt.vy -= 14 * delta;
-        pt.mesh.position.x += pt.vx * delta;
-        pt.mesh.position.y += pt.vy * delta;
-        pt.mesh.position.z += pt.vz * delta;
-        const s = 1 - pt.life / pt.maxLife;
-        pt.mesh.scale.setScalar(Math.max(0.05, s));
-      }
+      // Update Zero-GC Particle Pool
+      particlePool.update(delta);
 
-      // Update Key Light to follow avatar elevation cleanly
-      keyLight.position.set(pos.x + 18, pos.y + 32, pos.z + 20);
-      keyLight.target.position.set(pos.x, pos.y, pos.z - 6);
-      keyLight.target.updateMatrixWorld();
+      // Update Sky Dome & Dynamic Shadow Frustum to follow avatar cleanly
+      envRig.updateShadowTarget(pos.x, pos.y, pos.z - 4);
 
       // Update Orbital Chase Camera (with immediate sign pass-through so the sign never stays in front of the camera)
       _camTarget.set(pos.x, pos.y + 1.85, pos.z);
@@ -1214,19 +1169,9 @@ export function ObbyCanvas({
       renderer.domElement.removeEventListener('webglcontextlost', handleContextLost);
       renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored);
 
-      scene.traverse((obj) => {
-        if (obj instanceof THREE.Mesh) {
-          obj.geometry.dispose();
-          if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
-          else obj.material.dispose();
-        }
-      });
-      renderer.dispose();
-      if (renderer.domElement.parentNode === container) {
-        container.removeChild(renderer.domElement);
-      }
+      disposeSceneResources(scene, renderer, envRig.envTexture);
     };
-  }, [level, student.avatarColor, student.equippedHat, student.equippedJersey]);
+  }, [level, student.id, student.avatarColor, student.equippedHat, student.equippedJersey, graphicsQuality]);
 
   if (contextLost) {
     return (

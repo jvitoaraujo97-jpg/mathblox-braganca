@@ -1,5 +1,5 @@
-import { Camera, ArrowUp } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { ArrowUp, Camera } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 
 export interface MobileInputState {
   moveX: number; // -1..1
@@ -11,15 +11,35 @@ export interface MobileInputState {
 interface MobileControlsProps {
   inputRef: React.MutableRefObject<MobileInputState>;
   onRotateCameraStep: () => void;
+  hideCameraButton?: boolean;
 }
 
-export function MobileControls({ inputRef, onRotateCameraStep }: MobileControlsProps) {
+export function MobileControls({
+  inputRef,
+  onRotateCameraStep,
+  hideCameraButton = false,
+}: MobileControlsProps) {
   const baseRef = useRef<HTMLDivElement>(null);
   const activePointerId = useRef<number | null>(null);
   const [knobOffset, setKnobOffset] = useState({ x: 0, y: 0 });
   const [jumpActive, setJumpActive] = useState(false);
+  const [isPortrait, setIsPortrait] = useState(() =>
+    typeof window !== 'undefined' ? window.innerHeight > window.innerWidth : false
+  );
 
-  const maxRadius = 42;
+  useEffect(() => {
+    const updateOrientation = () => {
+      setIsPortrait(window.innerHeight > window.innerWidth);
+    };
+    window.addEventListener('resize', updateOrientation);
+    window.addEventListener('orientationchange', updateOrientation);
+    return () => {
+      window.removeEventListener('resize', updateOrientation);
+      window.removeEventListener('orientationchange', updateOrientation);
+    };
+  }, []);
+
+  const maxRadius = isPortrait ? 36 : 40;
   const deadzone = 0.1;
 
   const updateStick = (clientX: number, clientY: number) => {
@@ -62,8 +82,8 @@ export function MobileControls({ inputRef, onRotateCameraStep }: MobileControlsP
   };
 
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex items-end justify-between px-5 pb-6 sm:px-8 sm:pb-8 pb-safe">
-      {/* Left: Virtual Analog Joystick */}
+    <>
+      {/* Left: Virtual Analog Joystick in Mandatory Bottom Safe Zone (bottom: calc(108px + safe-area), left: 20px) */}
       <div
         ref={baseRef}
         onPointerDown={(e) => {
@@ -87,7 +107,13 @@ export function MobileControls({ inputRef, onRotateCameraStep }: MobileControlsP
             resetStick();
           }
         }}
-        className="pointer-events-auto touch-none-select relative flex h-32 w-32 items-center justify-center rounded-full border-2 border-white/25 bg-slate-950/55 shadow-lg"
+        style={{
+          bottom: 'calc(108px + env(safe-area-inset-bottom))',
+          left: '20px',
+        }}
+        className={`pointer-events-auto touch-none-select fixed z-50 flex items-center justify-center rounded-full border-2 border-white/25 bg-slate-950/50 shadow-lg ${
+          isPortrait ? 'h-[106px] w-[106px]' : 'h-[116px] w-[116px]'
+        }`}
         aria-label="Joystick virtual de movimento"
       >
         <div className="pointer-events-none absolute inset-4 rounded-full border border-white/10" />
@@ -95,12 +121,14 @@ export function MobileControls({ inputRef, onRotateCameraStep }: MobileControlsP
           style={{
             transform: `translate3d(${knobOffset.x}px, ${knobOffset.y}px, 0)`,
           }}
-          className="pointer-events-none h-14 w-14 rounded-full border-2 border-white/60 bg-white/85 shadow-md transition-transform duration-75"
+          className={`pointer-events-none rounded-full border-2 border-white/70 bg-white/85 shadow-md transition-transform duration-75 ${
+            isPortrait ? 'h-11 w-11' : 'h-12 w-12'
+          }`}
         />
       </div>
 
-      {/* Right: Camera Rotate + Large Jump Button */}
-      <div className="pointer-events-auto flex flex-col items-end gap-3">
+      {/* Discreet Mid-Right Camera Rotate Button (completely separated from Jump button) */}
+      {!hideCameraButton && (
         <button
           type="button"
           onPointerDown={(e) => {
@@ -110,39 +138,46 @@ export function MobileControls({ inputRef, onRotateCameraStep }: MobileControlsP
             e.stopPropagation();
             onRotateCameraStep();
           }}
-          className="flex min-h-[44px] min-w-[44px] items-center gap-1.5 rounded-xl border border-white/20 bg-slate-950/75 px-3.5 py-2 text-xs font-semibold text-white shadow-md active:scale-95 transition-transform whitespace-nowrap"
+          className="pointer-events-auto fixed right-[18px] top-1/2 -translate-y-1/2 z-40 flex h-11 w-11 items-center justify-center rounded-full border border-white/20 bg-slate-950/60 text-sky-300 shadow-md backdrop-blur-sm active:scale-95 transition-transform"
           aria-label="Girar câmera"
+          title="Girar câmera"
         >
-          <Camera className="h-4 w-4 text-sky-400" />
-          <span>Câmera</span>
+          <Camera className="h-5 w-5" />
         </button>
+      )}
 
-        <button
-          type="button"
-          onPointerDown={(e) => {
-            e.stopPropagation();
-            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-            inputRef.current.jumpPressed = true;
-            setJumpActive(true);
-          }}
-          onPointerUp={(e) => {
-            e.stopPropagation();
-            inputRef.current.jumpPressed = false;
-            setJumpActive(false);
-          }}
-          onPointerCancel={() => {
-            inputRef.current.jumpPressed = false;
-            setJumpActive(false);
-          }}
-          className={`touch-none-select flex h-20 w-20 sm:h-22 sm:w-22 flex-col items-center justify-center rounded-full border-4 border-emerald-300/80 text-white shadow-xl transition-transform ${
-            jumpActive ? 'scale-90 bg-emerald-600' : 'bg-emerald-500 hover:bg-emerald-400'
-          }`}
-          aria-label="Pular"
-        >
-          <ArrowUp className="h-7 w-7 stroke-[3]" />
-          <span className="font-display text-xs font-extrabold tracking-wide">PULAR</span>
-        </button>
-      </div>
-    </div>
+      {/* Right: Isolated High-Contrast JUMP Button (68px portrait / 72px landscape, z-60, Bottom Safe Zone >= 112px) */}
+      <button
+        type="button"
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+          inputRef.current.jumpPressed = true;
+          setJumpActive(true);
+        }}
+        onPointerUp={(e) => {
+          e.stopPropagation();
+          inputRef.current.jumpPressed = false;
+          setJumpActive(false);
+        }}
+        onPointerCancel={() => {
+          inputRef.current.jumpPressed = false;
+          setJumpActive(false);
+        }}
+        style={{
+          bottom: 'calc(112px + env(safe-area-inset-bottom))',
+          right: '20px',
+        }}
+        className={`pointer-events-auto touch-none-select fixed z-[60] flex flex-col items-center justify-center rounded-full border-4 border-emerald-200/90 text-white shadow-2xl transition-transform ${
+          isPortrait ? 'h-[68px] w-[68px]' : 'h-[72px] w-[72px]'
+        } ${jumpActive ? 'scale-90 bg-emerald-600' : 'bg-emerald-500 hover:bg-emerald-400'}`}
+        aria-label="Pular"
+      >
+        <ArrowUp className="h-6 w-6 stroke-[3]" />
+        <span className="font-display text-[11px] font-black tracking-wide leading-none mt-0.5">
+          PULAR
+        </span>
+      </button>
+    </>
   );
 }

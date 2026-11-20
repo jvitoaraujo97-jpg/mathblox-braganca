@@ -1,5 +1,18 @@
 import { useMemo, useState } from 'react';
-import { Car, Coins, Flame, Layers, Play, Sparkles, Timer, Trophy, Zap } from 'lucide-react';
+import {
+  Car,
+  Coins,
+  Flame,
+  Layers,
+  Play,
+  Sparkles,
+  Swords,
+  Target,
+  Timer,
+  Trophy,
+  Waves,
+  Zap,
+} from 'lucide-react';
 import { getWorldById, TOWER_DIFFICULTIES, WORLDS } from '../data/worlds';
 import { GameModeType, StudentProfile, TowerDifficulty } from '../types/game';
 
@@ -7,6 +20,7 @@ interface GameModeSelectorProps {
   student: StudentProfile;
   initialMode?: GameModeType;
   onStartMode: (mode: GameModeType, worldId: number, difficulty: TowerDifficulty) => void;
+  onOpenMultiplayer?: () => void;
 }
 
 const MODE_CARDS: {
@@ -56,8 +70,8 @@ const MODE_CARDS: {
     subtitle:
       'Pista longa de 950m com 8 portões espaçados a cada 110m e setas luminosas no chão para cálculo mental ágil!',
     mechanics: [
-      '5º/6º: Tabuada direta, fator oculto, divisão e sequências',
-      '7º ao 9º: Tabuada de inteiros negativos, raízes e potências',
+      '1º ao 6º Ano: Contagem, soma, subtração, tabuada direta e divisão',
+      '7º ao 9º Ano: Inteiros negativos, raízes, potências e cálculo mental',
       '6 a 8s entre portões + Mega Turbo 2.2x nos acertos',
     ],
     accentColor: 'text-sky-400',
@@ -66,18 +80,48 @@ const MODE_CARDS: {
   },
   {
     id: 'vehicle_rally',
-    title: 'Rali de Kart 3D',
-    tag: 'Portal Dourado · Modo Veículo 3D (Novo!)',
+    title: 'Rali de Kart 2.0',
+    tag: 'Portal Dourado · Curvas, Drift & Praia de Ajuruteua',
     subtitle:
-      'Pilote seu Kart/Buggy 3D com seu avatar sentado ao volante, salte pelas rampas e atravesse os 8 arcos de checkpoint!',
+      'Circuito sinuoso na Estrada de Ajuruteua (PA-458) com Drift com Mini-Turbo, zebras PBR, rampas de salto e chegada na praia!',
     mechanics: [
-      'Kart 3D com a cor/camisa do seu time e rodas que esterçam',
-      'Arco certo = Chamas de Nitro Boost (30 u/s) por 4s',
-      'Arco errado = Giro de 360° + dica rápida de resolução',
+      'Segure DRIFT nas curvas para soltar faíscas e carregar Mini-Turbo (+45%)',
+      'Assistência de Curva opcional (ativada por padrão para 1º ao 3º Ano)',
+      'Desvie de lama e cones, salte rampas e atravesse os 8 portais',
     ],
     accentColor: 'text-yellow-300',
     borderClass: 'border-yellow-400/60',
     buttonClass: 'bg-yellow-400 hover:bg-yellow-300 text-slate-950',
+  },
+  {
+    id: 'penalty',
+    title: 'Pênaltis da Matemática',
+    tag: 'Portal Estádio · Estádio do Caeté (Futebol 3D)',
+    subtitle:
+      'Vista sua camisa de time, mire nos 3 alvos luminosos do gol (A, B, C) e faça golaços acertando questões BNCC!',
+    mechanics: [
+      '8 cobranças de pênalti com goleiro articulado e torcida vibrante',
+      'Toque direto nos alvos do gol 3D ou use os botões elevados A, B e C',
+      'Desbloqueie o título ⚽ Artilheiro do Caeté marcando gols!',
+    ],
+    accentColor: 'text-emerald-300',
+    borderClass: 'border-emerald-400/60',
+    buttonClass: 'bg-emerald-400 hover:bg-emerald-300 text-slate-950',
+  },
+  {
+    id: 'caete_boat',
+    title: 'Regata no Rio Caeté',
+    tag: 'Portal Turquesa · Cálculo Mental Fluvial (Rio Caeté)',
+    subtitle:
+      'Pilote uma voadeira de alumínio entre açaizeiros, miritizeiros e trapiches até a Orla de Bragança e o Mirante de São Benedito!',
+    mechanics: [
+      '8 estágios de boias luminosas (A, B, C) com barra regressiva de 10s',
+      'Desvie de balseiros, bancos de areia e ilhotas de mururé com Turbo de Popa',
+      'Complete a travessia ou acerte 8 boias para desbloquear ⚓ Comandante do Caeté!',
+    ],
+    accentColor: 'text-teal-300',
+    borderClass: 'border-teal-400/60',
+    buttonClass: 'bg-teal-400 hover:bg-teal-300 text-slate-950',
   },
 ];
 
@@ -85,6 +129,7 @@ export function GameModeSelector({
   student,
   initialMode = 'obby',
   onStartMode,
+  onOpenMultiplayer,
 }: GameModeSelectorProps) {
   const [selectedWorldId, setSelectedWorldId] = useState<number>(student.worldId);
   const [selectedDifficulty, setSelectedDifficulty] = useState<TowerDifficulty>('gold');
@@ -179,7 +224,34 @@ export function GameModeSelector({
         </div>
       </div>
 
-      {/* Step 2: 4 Modalidades de Jogo 3D */}
+      {/* Banner Destaque: Arena Multiplayer Online (Kart 2-6P & Duelo 1v1) */}
+      {onOpenMultiplayer && (
+        <div className="flex flex-col gap-4 rounded-3xl border-2 border-cyan-400/50 bg-gradient-to-r from-cyan-950/90 via-slate-900 to-blue-950/90 p-5 shadow-xl sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/40 bg-cyan-500/15 px-2.5 py-0.5 text-[11px] font-black text-cyan-300">
+              <Swords className="h-3.5 w-3.5" />
+              NOVO · MULTIPLAYER EM TEMPO REAL (FAIR PLAY BNCC)
+            </div>
+            <h3 className="mt-1.5 font-display text-xl sm:text-2xl font-black text-white">
+              Arena Multiplayer — Kart 2 a 6 Jogadores &amp; Duelo 1v1
+            </h3>
+            <p className="mt-1 text-xs text-slate-300">
+              Crie uma Sala Privada de 4 dígitos para amigos ou entre na Fila Pública! Alunos de
+              séries diferentes competem juntos com perguntas justas do seu próprio ano.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenMultiplayer}
+            className="flex min-h-[48px] shrink-0 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-cyan-400 to-blue-500 px-5 py-3 font-display text-xs sm:text-sm font-black text-slate-950 shadow-lg transition hover:brightness-110 active:scale-95"
+          >
+            <Swords className="h-4 w-4" />
+            <span>ENTRAR NA ARENA MULTIPLAYER</span>
+          </button>
+        </div>
+      )}
+
+      {/* Step 2: 6 Modalidades de Jogo 3D */}
       <div className="grid gap-5 md:grid-cols-2">
         {MODE_CARDS.map((card) => {
           const isHighlighted = highlightedMode === card.id;
@@ -206,6 +278,8 @@ export function GameModeSelector({
                   {card.id === 'survival' && <Flame className="h-6 w-6 text-amber-400 shrink-0" />}
                   {card.id === 'turbo_race' && <Zap className="h-6 w-6 text-sky-400 shrink-0" />}
                   {card.id === 'vehicle_rally' && <Car className="h-6 w-6 text-yellow-300 shrink-0" />}
+                  {card.id === 'penalty' && <Target className="h-6 w-6 text-emerald-300 shrink-0" />}
+                  {card.id === 'caete_boat' && <Waves className="h-6 w-6 text-teal-300 shrink-0" />}
                   <h3 className="font-display text-2xl font-extrabold text-white">{card.title}</h3>
                 </div>
 

@@ -594,6 +594,41 @@ class SoundEngine {
     this.playTone(523.25, 523.25, 0.18, 'triangle', 0.16, 0.12);
     this.playTone(698.46, 698.46, 0.34, 'sine', 0.18, 0.18);
   }
+
+  /** Chute potente na bola de futebol */
+  playKickBall(): void {
+    this.playTone(170, 52, 0.14, 'sine', 0.24, 0);
+    this.playFilteredNoiseSweep(0.09, 950, 260, 0.14);
+  }
+
+  /** Grito de gol sintetizado + vibração de torcida no Estádio do Caeté */
+  playGoalCheer(): void {
+    this.playFilteredNoiseSweep(0.95, 550, 2200, 0.22);
+    const notes = [523.25, 659.25, 783.99, 1046.5, 1318.51];
+    notes.forEach((n, idx) => {
+      this.playTone(n, n * 1.01, 0.22, 'sawtooth', 0.11, idx * 0.07);
+      this.playTone(n, n, 0.28, 'triangle', 0.14, idx * 0.07);
+    });
+  }
+
+  /** Disparo de canhão laser 3D na Defesa da Praça */
+  playLaserBeam(): void {
+    this.playTone(1680, 220, 0.28, 'sawtooth', 0.15, 0);
+    this.playTone(1240, 320, 0.24, 'square', 0.09, 0.02);
+  }
+
+  /** Explosão espacial de meteoro */
+  playMeteorExplosion(): void {
+    this.playFilteredNoiseSweep(0.45, 1400, 120, 0.25);
+    this.playTone(135, 34, 0.38, 'sawtooth', 0.2, 0);
+  }
+
+  /** Raio energético 3D no Duelo Matemático 1v1 */
+  playDuelBolt(): void {
+    this.playTone(980, 1850, 0.11, 'sawtooth', 0.13, 0);
+    this.playTone(1850, 340, 0.2, 'square', 0.12, 0.09);
+    this.playFilteredNoiseSweep(0.18, 2400, 600, 0.12);
+  }
 }
 
 export const soundEngine = new SoundEngine();

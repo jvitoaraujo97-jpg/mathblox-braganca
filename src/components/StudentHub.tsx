@@ -1,49 +1,113 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Check,
   Coins,
-  Crown,
   Gamepad2,
   LogOut,
   Pencil,
-  Shield,
   ShoppingBag,
+  Swords,
   Target,
   Trophy,
   Users,
   X,
 } from 'lucide-react';
+import {
+  countClaimableDailyMissions,
+  subscribeDailyMissions,
+} from '../data/missionsAndTitles';
 import { getJerseyConfig } from '../three/jerseyBuilder';
 import { SocialPlaza3D } from '../three/SocialPlaza3D';
-import { GameModeType, StudentProfile, TowerDifficulty } from '../types/game';
+import {
+  GameModeType,
+  MultiplayerSessionConfig,
+  StudentProfile,
+  TowerDifficulty,
+} from '../types/game';
 import { AvatarShop3D } from './AvatarShop3D';
 import { AudioSettingsButton } from './AudioSettingsModal';
+import { DailyMissionsModal } from './DailyMissionsModal';
 import { GameModeSelector } from './GameModeSelector';
+import { LeaderboardPanel } from './LeaderboardModal';
+import { MultiplayerLobbyModal } from './MultiplayerLobbyModal';
 
 interface StudentHubProps {
   student: StudentProfile;
   allStudents: StudentProfile[];
+  lastSyncedAt: Date | null;
+  onRefreshStudents: () => Promise<void>;
   onStartMode: (mode: GameModeType, worldId: number, difficulty: TowerDifficulty) => void;
-  onUpdateStudent: (updated: StudentProfile) => void;
+  onStartMultiplayer: (session: MultiplayerSessionConfig) => void;
+  onUpdateStudent: (updated: StudentProfile) => Promise<void> | void;
   onLogout: () => void;
 }
 
 type StudentTab = 'praca' | 'modalidades' | 'loja' | 'ranking';
-type RankingCategory = 'geral' | 'serie' | 'precisao';
 
 export function StudentHub({
   student,
   allStudents,
+  lastSyncedAt,
+  onRefreshStudents,
   onStartMode,
+  onStartMultiplayer,
   onUpdateStudent,
   onLogout,
 }: StudentHubProps) {
   const [activeTab, setActiveTab] = useState<StudentTab>('praca');
-  const [rankingCategory, setRankingCategory] = useState<RankingCategory>('geral');
+  const [refreshingRanking, setRefreshingRanking] = useState(false);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [multiplayerOpen, setMultiplayerOpen] = useState(false);
+  const [missionsOpen, setMissionsOpen] = useState(false);
+  const [claimableMissions, setClaimableMissions] = useState(() =>
+    countClaimableDailyMissions(student.id)
+  );
+
+  useEffect(
+    () =>
+      subscribeDailyMissions(() => {
+        setClaimableMissions(countClaimableDailyMissions(student.id));
+      }),
+    [student.id]
+  );
 
   // Inline School Editing State
   const [editingSchool, setEditingSchool] = useState(false);
   const [schoolInput, setSchoolInput] = useState(student.school);
+
+  // Trigger silent cloud refresh whenever Ranking tab is opened
+  useEffect(() => {
+    if (activeTab !== 'ranking') return;
+    let mounted = true;
+    setRefreshingRanking(true);
+    void onRefreshStudents().finally(() => {
+      if (mounted) setRefreshingRanking(false);
+    });
+    const timer = window.setInterval(() => setNowTick(Date.now()), 5000);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, [activeTab, onRefreshStudents]);
+
+  const handleManualRefreshRanking = () => {
+    if (refreshingRanking) return;
+    setRefreshingRanking(true);
+    void onRefreshStudents().finally(() => {
+      setRefreshingRanking(false);
+      setNowTick(Date.now());
+    });
+  };
+
+  const syncTimestampLabel = useMemo(() => {
+    if (!lastSyncedAt) return 'Sincronizando...';
+    const diffSec = Math.max(0, Math.floor((nowTick - lastSyncedAt.getTime()) / 1000));
+    if (diffSec < 15) return 'Atualizado agora';
+    if (diffSec < 60) return `Atualizado há ${diffSec}s`;
+    const hh = String(lastSyncedAt.getHours()).padStart(2, '0');
+    const mm = String(lastSyncedAt.getMinutes()).padStart(2, '0');
+    return `Atualizado às ${hh}:${mm}`;
+  }, [lastSyncedAt, nowTick]);
 
   const equippedClub = useMemo(
     () => getJerseyConfig(student.equippedJersey),
@@ -65,25 +129,44 @@ export function StudentHub({
     setEditingSchool(false);
   };
 
-  const rankedList = useMemo(() => {
-    const base =
-      rankingCategory === 'serie'
-        ? allStudents.filter((s) => s.grade === student.grade)
-        : [...allStudents];
+  if (activeTab === 'praca') {
+    return (
+      <>
+        <SocialPlaza3D
+          student={student}
+          allStudents={allStudents}
+          onUpdateStudent={onUpdateStudent}
+          onEnterGameMode={(mode) => onStartMode(mode, student.worldId, 'gold')}
+          onOpenModes={() => setActiveTab('modalidades')}
+          onOpenShop={() => setActiveTab('loja')}
+          onOpenRanking={() => setActiveTab('ranking')}
+          onOpenMultiplayer={() => setMultiplayerOpen(true)}
+          onOpenMissions={() => setMissionsOpen(true)}
+          onLogout={onLogout}
+        />
 
-    return base.sort((a, b) => {
-      if (rankingCategory === 'precisao') {
-        const accA = a.questionsAnswered > 0 ? a.questionsCorrect / a.questionsAnswered : 0;
-        const accB = b.questionsAnswered > 0 ? b.questionsCorrect / b.questionsAnswered : 0;
-        if (Math.abs(accB - accA) > 0.001) return accB - accA;
-        if (b.questionsCorrect !== a.questionsCorrect) return b.questionsCorrect - a.questionsCorrect;
-        return b.xp - a.xp;
-      }
-      if (b.xp !== a.xp) return b.xp - a.xp;
-      if (b.questionsCorrect !== a.questionsCorrect) return b.questionsCorrect - a.questionsCorrect;
-      return b.bestStreak - a.bestStreak;
-    });
-  }, [allStudents, rankingCategory, student.grade]);
+        {/* Modais Fase 2: Missões Diárias & Títulos + Arena Multiplayer */}
+        <DailyMissionsModal
+          isOpen={missionsOpen}
+          student={student}
+          onClose={() => setMissionsOpen(false)}
+          onUpdateStudent={async (updated) => {
+            await onUpdateStudent(updated);
+          }}
+        />
+
+        <MultiplayerLobbyModal
+          isOpen={multiplayerOpen}
+          student={student}
+          onClose={() => setMultiplayerOpen(false)}
+          onStartMultiplayer={(session) => {
+            setMultiplayerOpen(false);
+            onStartMultiplayer(session);
+          }}
+        />
+      </>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 pb-22 sm:pb-10">
@@ -99,11 +182,7 @@ export function StudentHub({
             <button
               type="button"
               onClick={() => setActiveTab('praca')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'praca'
-                  ? 'text-emerald-400 border-b-2 border-emerald-400'
-                  : 'text-slate-400 hover:text-white'
-              }`}
+              className="py-1 transition-colors whitespace-nowrap shrink-0 text-emerald-400 hover:text-emerald-300"
             >
               Praça Social 3D
             </button>
@@ -116,7 +195,7 @@ export function StudentHub({
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              4 Modalidades (Jogar)
+              6 Modalidades (Jogar)
             </button>
             <button
               type="button"
@@ -178,6 +257,11 @@ export function StudentHub({
                     {student.name}
                   </h1>
                   <span className="text-xs font-semibold text-sky-400">· {student.grade}</span>
+                  {student.equippedTitle && (
+                    <span className="rounded-lg border border-yellow-400/50 bg-yellow-400/15 px-2 py-0.5 text-[11px] font-black text-yellow-200">
+                      {student.equippedTitle}
+                    </span>
+                  )}
                   <span className="rounded-lg border border-amber-400/40 bg-amber-400/15 px-2 py-0.5 text-[11px] font-bold text-amber-300">
                     ⚡ Aura Nv. {Math.max(1, Math.floor((student.auraPower || 0) / 10) + 1)} ({student.auraPower || 0} pts)
                   </span>
@@ -205,6 +289,27 @@ export function StudentHub({
                     >
                       <Pencil className="h-3 w-3" />
                       <span>Editar</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMultiplayerOpen(true)}
+                      className="inline-flex min-h-[30px] items-center gap-1 rounded-lg border border-cyan-500/50 bg-cyan-500/15 px-2.5 py-1 text-[11px] font-extrabold text-cyan-200 hover:bg-cyan-400 hover:text-slate-950 transition-colors"
+                    >
+                      <Swords className="h-3 w-3" />
+                      <span>Jogar com Amigos</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMissionsOpen(true)}
+                      className="inline-flex min-h-[30px] items-center gap-1 rounded-lg border border-amber-400/50 bg-amber-500/15 px-2.5 py-1 text-[11px] font-extrabold text-amber-200 hover:bg-amber-400 hover:text-slate-950 transition-colors"
+                    >
+                      <Target className="h-3 w-3" />
+                      <span>Missões</span>
+                      {claimableMissions > 0 && (
+                        <span className="rounded-full bg-emerald-400 px-1.5 text-[10px] font-black text-slate-950">
+                          {claimableMissions}
+                        </span>
+                      )}
                     </button>
                   </div>
                 ) : (
@@ -267,23 +372,14 @@ export function StudentHub({
           </div>
         </section>
 
-        {/* ABA 1: PRAÇA SOCIAL 3D ONLINE */}
-        {activeTab === 'praca' && (
-          <div className="mt-5">
-            <SocialPlaza3D
-              student={student}
-              allStudents={allStudents}
-              onUpdateStudent={onUpdateStudent}
-              onEnterGameMode={(mode) => onStartMode(mode, student.worldId, 'gold')}
-              onOpenShop={() => setActiveTab('loja')}
-            />
-          </div>
-        )}
-
-        {/* ABA 2: SELETOR DAS 3 MODALIDADES 3D */}
+        {/* ABA 2: SELETOR DAS 6 MODALIDADES 3D + ARENA MULTIPLAYER */}
         {activeTab === 'modalidades' && (
           <div className="mt-5">
-            <GameModeSelector student={student} onStartMode={onStartMode} />
+            <GameModeSelector
+              student={student}
+              onStartMode={onStartMode}
+              onOpenMultiplayer={() => setMultiplayerOpen(true)}
+            />
           </div>
         )}
 
@@ -294,126 +390,17 @@ export function StudentHub({
           </div>
         )}
 
-        {/* ABA 4: RANKING COMPETITIVO (3 CATEGORIAS) */}
+        {/* ABA 4: RANKING COMPETITIVO (INDIVIDUAL + BATALHA DE COLÉGIOS) */}
         {activeTab === 'ranking' && (
-          <section className="mt-5 mx-auto max-w-5xl">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h2 className="font-display text-2xl font-extrabold text-white">
-                  Placar Competitivo MathBlox
-                </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Pontuação unificada da Torre Obby, Arena Sobrevivência e Corrida Turbo ({student.grade})
-                </p>
-              </div>
-
-              <div className="flex items-center gap-1 rounded-xl border border-slate-800 bg-slate-900 p-1 overflow-x-auto">
-                <button
-                  type="button"
-                  onClick={() => setRankingCategory('geral')}
-                  className={`flex min-h-[38px] items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                    rankingCategory === 'geral'
-                      ? 'bg-amber-400 text-slate-950'
-                      : 'text-slate-300 hover:text-white'
-                  }`}
-                >
-                  <Crown className="h-3.5 w-3.5" />
-                  <span>Top Geral</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRankingCategory('serie')}
-                  className={`flex min-h-[38px] items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                    rankingCategory === 'serie'
-                      ? 'bg-sky-500 text-slate-950'
-                      : 'text-slate-300 hover:text-white'
-                  }`}
-                >
-                  <Shield className="h-3.5 w-3.5" />
-                  <span>Liga da Minha Série ({student.grade})</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRankingCategory('precisao')}
-                  className={`flex min-h-[38px] items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                    rankingCategory === 'precisao'
-                      ? 'bg-emerald-500 text-slate-950'
-                      : 'text-slate-300 hover:text-white'
-                  }`}
-                >
-                  <Target className="h-3.5 w-3.5" />
-                  <span>Rei da Precisão</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-5 overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead className="border-b border-slate-800 bg-slate-950/70 text-xs text-slate-400">
-                    <tr>
-                      <th className="px-4 py-3.5 font-semibold">Posição</th>
-                      <th className="px-4 py-3.5 font-semibold">Nome</th>
-                      <th className="px-4 py-3.5 font-semibold">Série</th>
-                      <th className="px-4 py-3.5 font-semibold">Colégio</th>
-                      <th className="px-4 py-3.5 font-semibold text-right">Precisão</th>
-                      <th className="px-4 py-3.5 font-semibold text-right">Pontuação</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/80">
-                    {rankedList.map((stu, idx) => {
-                      const isMe = stu.id === student.id;
-                      const acc =
-                        stu.questionsAnswered > 0
-                          ? Math.round((stu.questionsCorrect / stu.questionsAnswered) * 100)
-                          : 0;
-                      const club = getJerseyConfig(stu.equippedJersey);
-                      return (
-                        <tr
-                          key={stu.id}
-                          className={isMe ? 'bg-sky-500/10' : 'hover:bg-slate-800/40'}
-                        >
-                          <td className="px-4 py-3.5 font-mono text-xs font-bold text-slate-300 tabular-nums">
-                            #{idx + 1}
-                          </td>
-                          <td className="px-4 py-3.5">
-                            <div className="flex items-center gap-2.5">
-                              <span
-                                className="h-3.5 w-3.5 rounded-sm shrink-0"
-                                style={{ backgroundColor: stu.avatarColor }}
-                              />
-                              <span
-                                className={`font-semibold ${
-                                  isMe ? 'text-sky-300' : 'text-white'
-                                }`}
-                              >
-                                {stu.name}
-                              </span>
-                              {club && (
-                                <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">
-                                  {club.shortTag}
-                                </span>
-                              )}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3.5 text-xs text-slate-300 whitespace-nowrap">
-                            {stu.grade}
-                          </td>
-                          <td className="px-4 py-3.5 text-xs text-slate-300">{stu.school}</td>
-                          <td className="px-4 py-3.5 text-right font-mono text-xs text-emerald-400 tabular-nums">
-                            {acc}% ({stu.questionsCorrect}/{stu.questionsAnswered})
-                          </td>
-                          <td className="px-4 py-3.5 text-right font-mono text-sm font-bold text-amber-400 tabular-nums whitespace-nowrap">
-                            {stu.xp} XP
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </section>
+          <div className="mt-5">
+            <LeaderboardPanel
+              student={student}
+              allStudents={allStudents}
+              syncTimestampLabel={syncTimestampLabel}
+              refreshing={refreshingRanking}
+              onManualRefresh={handleManualRefreshRanking}
+            />
+          </div>
         )}
       </main>
 
@@ -422,9 +409,7 @@ export function StudentHub({
         <button
           type="button"
           onClick={() => setActiveTab('praca')}
-          className={`flex min-h-[56px] flex-col items-center justify-center gap-1 text-[10px] font-bold ${
-            activeTab === 'praca' ? 'text-emerald-400' : 'text-slate-400'
-          }`}
+          className="flex min-h-[56px] flex-col items-center justify-center gap-1 text-[10px] font-bold text-emerald-400"
         >
           <Users className="h-5 w-5" />
           <span>Praça 3D</span>
@@ -460,6 +445,25 @@ export function StudentHub({
           <span>Ranking</span>
         </button>
       </nav>
+      {/* Modais Fase 2: Missões Diárias & Títulos + Arena Multiplayer */}
+      <DailyMissionsModal
+        isOpen={missionsOpen}
+        student={student}
+        onClose={() => setMissionsOpen(false)}
+        onUpdateStudent={async (updated) => {
+          await onUpdateStudent(updated);
+        }}
+      />
+
+      <MultiplayerLobbyModal
+        isOpen={multiplayerOpen}
+        student={student}
+        onClose={() => setMultiplayerOpen(false)}
+        onStartMultiplayer={(session) => {
+          setMultiplayerOpen(false);
+          onStartMultiplayer(session);
+        }}
+      />
     </div>
   );
 }
